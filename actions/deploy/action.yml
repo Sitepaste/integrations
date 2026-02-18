@@ -25,5 +25,5 @@ outputs:
   deploy-url:
     description: 'URL of the deployed site'
 runs:
-  using: 'node22'
+  using: 'node24'
   main: 'index.js'
