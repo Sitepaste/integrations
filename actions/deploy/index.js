@@ -5,7 +5,7 @@ const API = 'https://sitepaste.com/api/v1/public/pages';
 const TYPES = new Set(['docs', 'blog', 'standalone']);
 
 const input = (name) =>
-  (process.env[`INPUT_${name.toUpperCase().split('-').join('_')}`] || '').trim();
+  (process.env[`INPUT_${name.toUpperCase()}`] || '').trim();
 const output = (name, value) => {
   const file = process.env.GITHUB_OUTPUT;
   if (file) fs.appendFileSync(file, `${name}=${value}\n`);
