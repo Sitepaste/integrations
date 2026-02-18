@@ -1,0 +1,29 @@
+name: 'Deploy to Sitepaste'
+description: 'Sync markdown files to Sitepaste and trigger a build'
+inputs:
+  api-token:
+    required: true
+    description: 'Sitepaste API token'
+  content-dir:
+    required: false
+    default: 'content'
+    description: 'Path to markdown files'
+  content-type:
+    required: false
+    default: 'docs'
+    description: 'Content type for all pages: docs, blog, or standalone'
+  site-id:
+    required: false
+    description: 'Target site UUID'
+  dry-run:
+    required: false
+    default: 'false'
+    description: 'Validate and preview without syncing or building'
+outputs:
+  page-count:
+    description: 'Number of pages synced'
+  deploy-url:
+    description: 'URL of the deployed site'
+runs:
+  using: 'node22'
+  main: 'index.js'

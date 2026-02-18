@@ -1,0 +1,21 @@
+name: Deploy docs
+
+on:
+  push:
+    branches: [main]
+    paths: [docs/**]
+
+concurrency:
+  group: sitepaste-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Sitepaste/integrations/actions/deploy@v1
+        with:
+          api-token: ${{ secrets.SITEPASTE_TOKEN }}
+          content-dir: docs
+          content-type: docs

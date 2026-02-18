@@ -1,0 +1,17 @@
+name: Preview deploy on PR
+
+on:
+  pull_request:
+    paths: [docs/**]
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Sitepaste/integrations/actions/deploy@v1
+        with:
+          api-token: ${{ secrets.SITEPASTE_TOKEN }}
+          content-dir: docs
+          content-type: docs
+          dry-run: 'true'
