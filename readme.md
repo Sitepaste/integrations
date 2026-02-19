@@ -1,14 +1,14 @@
-# Sitepaste Integrations
+# Integrations
 
-Official integrations for [Sitepaste](https://sitepaste.com). Integrations are written in JavaScript with no dependencies. Node.js stdlib only.
+Official integrations for Sitepaste. Integrations are written in python3 using the stdlib.
 
 ## Format and lint
 
-This repo uses [oxfmt](https://oxc.rs/docs/guide/usage/formatter.html) for formatting and [oxlint](https://oxc.rs/docs/guide/usage/linter.html) for linting. Run both before committing:
+This repo uses [ruff](https://docs.astral.sh/ruff/) for linting and formatting. Run both before committing:
 
 ```sh
-npx oxfmt --write .
-npx oxlint .
+ruff check .
+ruff format .
 ```
 
 ## Actions

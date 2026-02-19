@@ -22,8 +22,19 @@ inputs:
 outputs:
   page-count:
     description: 'Number of pages synced'
+    value: ${{ steps.deploy.outputs.page-count }}
   deploy-url:
     description: 'URL of the deployed site'
+    value: ${{ steps.deploy.outputs.deploy-url }}
 runs:
-  using: 'node24'
-  main: 'index.js'
+  using: 'composite'
+  steps:
+    - id: deploy
+      shell: bash
+      run: python3 "${{ github.action_path }}/main.py"
+      env:
+        INPUT_API_TOKEN: ${{ inputs.api-token }}
+        INPUT_CONTENT_DIR: ${{ inputs.content-dir }}
+        INPUT_CONTENT_TYPE: ${{ inputs.content-type }}
+        INPUT_SITE_ID: ${{ inputs.site-id }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
