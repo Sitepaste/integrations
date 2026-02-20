@@ -1,0 +1,10 @@
+{
+	"id": "sitepaste",
+	"name": "Sitepaste",
+	"version": "0.1.0",
+	"minAppVersion": "1.5.7",
+	"description": "Publish markdown notes to Sitepaste directly from Obsidian.",
+	"author": "Sitepaste",
+	"authorUrl": "https://sitepaste.com",
+	"isDesktopOnly": false
+}

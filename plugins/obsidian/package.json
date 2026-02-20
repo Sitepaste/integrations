@@ -1,0 +1,14 @@
+{
+	"name": "obsidian-sitepaste",
+	"version": "0.1.0",
+	"private": true,
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "node esbuild.config.mjs production"
+	},
+	"devDependencies": {
+		"esbuild": "^0.25.0",
+		"obsidian": "^1.7.2",
+		"typescript": "^5.7.0"
+	}
+}

@@ -54,6 +54,8 @@ All fields are optional. `slug` is derived from the filename when absent (lowerc
 
 Every file in the batch uses the same content type.
 
+> The `homepage` content type exists but is not supported by this action. A site can only have one homepage, so it must be published individually through the dashboard or the Obsidian plugin's single-file publish.
+
 ## How it works
 
 1. Walks the content directory recursively for `.md` files, skipping hidden entries.

@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "scripts": {
+    "lint": "oxlint plugins/*/src/",
+    "format": "oxfmt plugins/"
+  },
+  "devDependencies": {
+    "oxfmt": "^0.13.0",
+    "oxlint": "^0.16.0"
+  }
+}

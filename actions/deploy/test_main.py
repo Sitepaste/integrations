@@ -105,6 +105,16 @@ class TestSlugify(unittest.TestCase):
     def test_strips_leading_and_trailing_hyphens(self):
         self.assertEqual(slugify("-hello-.md"), "hello")
 
+    def test_truncates_long_slugs(self):
+        result = slugify(("a" * 150) + ".md")
+        self.assertLessEqual(len(result), 100)
+
+    def test_trims_trailing_hyphen_after_truncation(self):
+        name = "a" * 99 + " b.md"
+        result = slugify(name)
+        self.assertLessEqual(len(result), 100)
+        self.assertFalse(result.endswith("-"))
+
 
 class TestTitleize(unittest.TestCase):
     def test_capitalizes_hyphen_separated_words(self):
@@ -312,6 +322,30 @@ class TestMain(unittest.TestCase):
                 main()
             self.assertEqual(captured["payload"]["pages"][0]["publishedAt"], "2024-06-15T00:00:00Z")
 
+    def test_reads_date_field_as_published_at_fallback(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ndate: 2024-06-15\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["publishedAt"], "2024-06-15T00:00:00Z")
+
+    def test_published_at_takes_precedence_over_date(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text(
+                "---\npublishedAt: 2024-07-01T12:00:00Z\ndate: 2024-06-15\n---\nbody"
+            )
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["publishedAt"], "2024-07-01T12:00:00Z")
+
     def test_passes_full_datetime_published_at_unchanged(self):
         with tempfile.TemporaryDirectory() as d:
             ts = "2024-06-15T14:30:00Z"
@@ -440,6 +474,50 @@ class TestMain(unittest.TestCase):
             ):
                 main()
             self.assertEqual(ctx.exception.code, 1)
+
+    def test_invalid_slug_format_fails_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\nslug: Hello World\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_too_many_tags_fails_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            tags = ", ".join(f"tag{i}" for i in range(21))
+            (Path(d) / "post.md").write_text(f"---\ntags: [{tags}]\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_invalid_tag_characters_fails_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntags: [C++]\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_invalid_published_at_fails_validation(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\npublishedAt: not-a-date\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_normalizes_tags_to_lowercase(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntags: [Python, TEST]\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["tags"], ["python", "test"])
 
     def test_build_warning_does_not_fail_action(self):
         with tempfile.TemporaryDirectory() as d:

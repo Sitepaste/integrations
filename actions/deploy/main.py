@@ -1,15 +1,17 @@
 import json
 import os
-import re
 import sys
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
 API = "https://sitepaste.com/api/v1/public/pages"
 TYPES = {"docs", "blog", "standalone"}
-IMG_RE = re.compile(r"!\[[^\]]*]\((?!https?://)([^)]+)\)")
+MAX_SLUG_LENGTH = 100
+MAX_TAGS_COUNT = 20
+MAX_TAG_LENGTH = 30
 
 
 def get_input(name):
@@ -88,14 +90,80 @@ def parse_front_matter(raw):
 
 def slugify(rel_path):
     name = Path(rel_path).stem.lower()
-    name = re.sub(r"'", "", name)
-    name = re.sub(r"[^a-z0-9]+", "-", name)
-    name = re.sub(r"-{2,}", "-", name)
-    return name.strip("-")
+    result = []
+    last_was_hyphen = True
+    for ch in name:
+        if ch == "'":
+            continue
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            result.append(ch)
+            last_was_hyphen = False
+        elif not last_was_hyphen:
+            result.append("-")
+            last_was_hyphen = True
+    s = "".join(result)
+    if s.endswith("-"):
+        s = s[:-1]
+    if len(s) > MAX_SLUG_LENGTH:
+        s = s[:MAX_SLUG_LENGTH]
+        if s.endswith("-"):
+            s = s[:-1]
+    return s
 
 
 def titleize(slug):
     return " ".join(w[0].upper() + w[1:] for w in slug.split("-") if w)
+
+
+def is_valid_slug(slug):
+    if not slug:
+        return False
+    for i, ch in enumerate(slug):
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            continue
+        if ch == "-" and 0 < i < len(slug) - 1:
+            continue
+        return False
+    return True
+
+
+def is_valid_tag(tag):
+    for ch in tag:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch == " " or ch == "-":
+            continue
+        return False
+    return True
+
+
+def is_valid_published_at(s):
+    try:
+        datetime.fromisoformat(s)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def find_relative_images(text):
+    refs = []
+    i = 0
+    while i < len(text):
+        start = text.find("![", i)
+        if start == -1:
+            break
+        close_bracket = text.find("]", start + 2)
+        if close_bracket == -1:
+            break
+        if close_bracket + 1 >= len(text) or text[close_bracket + 1] != "(":
+            i = close_bracket + 1
+            continue
+        close_paren = text.find(")", close_bracket + 2)
+        if close_paren == -1:
+            break
+        url = text[close_bracket + 2 : close_paren]
+        if not url.startswith("http://") and not url.startswith("https://"):
+            refs.append(url)
+        i = close_paren + 1
+    return refs
 
 
 def walk_md(directory):
@@ -152,8 +220,16 @@ def main():
         if body_size > 100_000:
             error(f"content exceeds 100000 byte limit ({body_size} bytes)", rel)
             valid = False
-        if len(slug) > 100:
-            error(f"slug exceeds 100 character limit ({len(slug)} chars)", rel)
+        if len(slug) > MAX_SLUG_LENGTH:
+            error(f"slug exceeds {MAX_SLUG_LENGTH} character limit ({len(slug)} chars)", rel)
+            valid = False
+        elif not is_valid_slug(slug):
+            error(
+                f'slug "{slug}" contains invalid characters'
+                " (only lowercase letters, numbers, and hyphens allowed,"
+                " must start and end with a letter or number)",
+                rel,
+            )
             valid = False
         if title_size > 200:
             error(f"title exceeds 200 byte limit ({title_size} bytes)", rel)
@@ -170,24 +246,43 @@ def main():
         else:
             slugs[slug] = rel
 
-        for m in IMG_RE.finditer(body):
+        for ref in find_relative_images(body):
             warn(
-                f'Contains relative image reference "{m.group(1)}". '
+                f'Contains relative image reference "{ref}". '
                 "Upload media separately via the dashboard or POST /api/v1/public/media.",
                 rel,
             )
 
         page = {"slug": slug, "title": title, "content": body, "contentType": content_type}
-        if attrs.get("description"):
+        if "description" in attrs:
             page["description"] = attrs["description"]
         if "draft" in attrs:
             page["draft"] = attrs["draft"]
         if attrs.get("tags"):
-            tags = attrs["tags"]
-            page["tags"] = tags if isinstance(tags, list) else [tags]
-        if attrs.get("publishedAt"):
-            pa = attrs["publishedAt"]
-            page["publishedAt"] = pa + "T00:00:00Z" if is_date_only(pa) else pa
+            raw_tags = attrs["tags"]
+            if not isinstance(raw_tags, list):
+                raw_tags = [raw_tags]
+            tags = [str(t).lower().strip() for t in raw_tags if str(t).strip()]
+            if len(tags) > MAX_TAGS_COUNT:
+                error(f"too many tags ({len(tags)}, max {MAX_TAGS_COUNT})", rel)
+                valid = False
+            for tag in tags:
+                if len(tag) > MAX_TAG_LENGTH:
+                    error(f'tag "{tag}" exceeds {MAX_TAG_LENGTH} character limit', rel)
+                    valid = False
+                elif not is_valid_tag(tag):
+                    error(f'tag "{tag}" contains invalid characters', rel)
+                    valid = False
+            if tags:
+                page["tags"] = tags
+        pa = attrs.get("publishedAt") or attrs.get("date")
+        if pa:
+            published_at = pa + "T00:00:00Z" if is_date_only(pa) else pa
+            if not is_valid_published_at(published_at):
+                error(f'publishedAt "{pa}" is not a valid date', rel)
+                valid = False
+            else:
+                page["publishedAt"] = published_at
 
         entries.append((rel, page))
 
@@ -217,6 +312,7 @@ def main():
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "User-Agent": "Sitepaste-Deploy",
         },
         method="POST",
     )
