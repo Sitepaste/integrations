@@ -27,7 +27,7 @@ export class ConfirmModal extends Modal {
     const list = contentEl.createEl('ul');
     for (const info of this.infos) {
       list.createEl('li', {
-        text: `${info.file.basename} → ${pagePath(info.contentType, info.slug)}`,
+        text: `${info.file.basename} → ${pagePath(info.contentType, info.slug, info.section)}`,
       });
     }
 

@@ -41,6 +41,7 @@ Control publishing behavior with frontmatter fields:
 title: My Page Title
 slug: custom-slug
 contentType: blog
+section: guides
 description: A short description
 draft: true
 tags: [tag1, tag2]
@@ -53,6 +54,7 @@ publishedAt: 2025-01-15
 | `title` | Page title. Defaults to title-cased filename. |
 | `slug` | URL slug. Defaults to slugified filename. |
 | `contentType` | `docs`, `blog`, `homepage`, or `standalone`. Overrides the default setting. `homepage` must be published individually (not as part of a folder batch) since a site can only have one. |
+| `section` | Optional sub-section for docs and blog pages that creates URLs like `/docs/{section}/{slug}`. The value is normalized to slug format. Vault folder structure is not used for sections so this must be set explicitly. |
 | `description` | Short description (max 500 bytes). |
 | `draft` | `true` or `false`. |
 | `tags` | Array of tags (max 20, each max 30 chars). |

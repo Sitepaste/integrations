@@ -131,7 +131,7 @@ export default class SitepastePlugin extends Plugin {
       }
 
       const action = info.isUpdate ? 'Updated' : 'Published';
-      let msg = `${action} "${info.title}" (${pagePath(info.contentType, info.slug)})`;
+      let msg = `${action} "${info.title}" (${pagePath(info.contentType, info.slug, info.section)})`;
       if (frontmatterFailed) {
         msg += '\nWarning: could not update local frontmatter.';
       }
@@ -197,12 +197,12 @@ export default class SitepastePlugin extends Plugin {
       // Check duplicate slugs within the same content type
       const slugKeys = new Map<string, string>();
       for (const info of infos) {
-        const key = `${info.contentType}:${info.slug}`;
+        const key = `${info.contentType}:${info.section ?? ''}:${info.slug}`;
         const existing = slugKeys.get(key);
         if (existing) {
           this.publishing = false;
           new Notice(
-            `Duplicate slug "${info.slug}" (${info.contentType}) in ${existing} and ${info.file.basename}`,
+            `Duplicate slug "${info.slug}" (${info.contentType}${info.section ? `/${info.section}` : ''}) in ${existing} and ${info.file.basename}`,
             8000,
           );
           return;
@@ -230,7 +230,7 @@ export default class SitepastePlugin extends Plugin {
 
     try {
       for (const info of infos) {
-        modal.log(`${info.file.basename} → ${pagePath(info.contentType, info.slug)}`);
+        modal.log(`${info.file.basename} → ${pagePath(info.contentType, info.slug, info.section)}`);
       }
 
       const batches = splitIntoBatches(infos);

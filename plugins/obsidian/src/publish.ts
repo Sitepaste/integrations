@@ -17,6 +17,7 @@ export interface FilePublishInfo {
   title: string;
   content: string;
   contentType: string;
+  section?: string;
   description?: string;
   draft?: boolean;
   tags?: string[];
@@ -79,6 +80,10 @@ export async function prepareFile(
   const description = typeof fm['description'] === 'string' ? fm['description'] : undefined;
   const draft = typeof fm['draft'] === 'boolean' ? fm['draft'] : undefined;
 
+  // extract section from frontmatter Obsidian folder structure is not used for sections
+  const rawSection = fm['section'];
+  const section = rawSection ? slugify(String(rawSection)) || undefined : undefined;
+
   let tags: string[] | undefined;
   if (fm['tags']) {
     const rawTags: unknown[] = Array.isArray(fm['tags']) ? fm['tags'] : [fm['tags']];
@@ -97,7 +102,7 @@ export async function prepareFile(
 
   const isUpdate = !!fm['sitepaste-slug'];
 
-  const errors = validatePage({ slug, title, content, description, tags, publishedAt });
+  const errors = validatePage({ slug, title, content, section, description, tags, publishedAt });
   if (fmContentType && !VALID_CONTENT_TYPES.has(fmContentType)) {
     errors.push({
       field: 'contentType',
@@ -111,6 +116,7 @@ export async function prepareFile(
     title,
     content,
     contentType,
+    section,
     description,
     draft,
     tags,
@@ -132,6 +138,7 @@ export async function doPublish(
       content: info.content,
       contentType: info.contentType,
     };
+    if (info.section) page.section = info.section;
     if (info.description !== undefined) page.description = info.description;
     if (info.draft !== undefined) page.draft = info.draft;
     if (info.tags) page.tags = info.tags;

@@ -8,6 +8,7 @@ export interface PagePayload {
   title: string;
   content: string;
   contentType: string;
+  section?: string;
   description?: string;
   draft?: boolean;
   tags?: string[];
@@ -25,6 +26,7 @@ export interface PageResult {
   slug: string;
   title: string;
   contentType: string;
+  section?: string;
   status: 'created' | 'updated';
 }
 

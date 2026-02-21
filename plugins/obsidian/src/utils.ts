@@ -32,9 +32,11 @@ export function titleize(slug: string): string {
     .join(' ');
 }
 
-export function pagePath(contentType: string, slug: string): string {
+export function pagePath(contentType: string, slug: string, section?: string): string {
   if (contentType === 'homepage') return '/';
-  return contentType === 'standalone' ? `/${slug}` : `/${contentType}/${slug}`;
+  if (contentType === 'standalone') return `/${slug}`;
+  if (section) return `/${contentType}/${section}/${slug}`;
+  return `/${contentType}/${slug}`;
 }
 
 export const MAX_SLUG_LENGTH = 100;
@@ -67,6 +69,11 @@ function isValidSlug(slug: string): boolean {
   return true;
 }
 
+function isValidSection(section: string): boolean {
+  if (!isValidSlug(section)) return false;
+  return !section.includes('--');
+}
+
 function isValidTag(tag: string): boolean {
   for (const ch of tag) {
     if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch === ' ' || ch === '-') continue;
@@ -79,6 +86,7 @@ export function validatePage(page: {
   slug: string;
   title: string;
   content: string;
+  section?: string;
   description?: string;
   tags?: string[];
   publishedAt?: string;
@@ -98,6 +106,21 @@ export function validatePage(page: {
       message:
         'slug must contain only lowercase letters, numbers, and hyphens, and must start and end with a letter or number',
     });
+  }
+
+  if (page.section) {
+    if (page.section.length > MAX_SLUG_LENGTH) {
+      errors.push({
+        field: 'section',
+        message: `section exceeds ${MAX_SLUG_LENGTH} character limit (${page.section.length} chars)`,
+      });
+    } else if (!isValidSection(page.section)) {
+      errors.push({
+        field: 'section',
+        message:
+          'section must contain only lowercase letters, numbers, and hyphens, must start and end with a letter or number, and must not contain consecutive hyphens',
+      });
+    }
   }
 
   if (!page.title) {

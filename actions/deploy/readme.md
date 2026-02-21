@@ -23,6 +23,21 @@ Requires a Pro plan, as API tokens can only be created and used on the Pro plan.
 | `site-id`      | No       |           | Target site UUID. Omit to use the default site.               |
 | `dry-run`      | No       | `false`   | Validate and preview without syncing or building.             |
 
+## Sections
+
+Subdirectories within the content directory become sections, adding a path segment between the content type and the slug.
+
+```
+getting-started.md              (/docs/getting-started)
+integrations/
+  github.md                     (/docs/integrations/github)
+  gitlab.md                     (/docs/integrations/gitlab)
+guides/
+  deployment.md                 (/docs/guides/deployment)
+```
+
+Pages with the same slug in different sections are allowed. Only one level of nesting is used; deeper subdirectories use the first directory as the section and emit a warning. A `section` field in front matter overrides the directory derived section.
+
 ## Front matter
 
 Optional YAML front matter is parsed from each markdown file:
@@ -31,6 +46,7 @@ Optional YAML front matter is parsed from each markdown file:
 ---
 title: Getting Started
 slug: getting-started
+section: integrations
 description: A guide to getting started
 tags: [guides, setup]
 draft: false
@@ -40,7 +56,7 @@ publishedAt: 2026-02-17
 Your content here...
 ```
 
-All fields are optional. `slug` is derived from the filename when absent (lowercased, special characters replaced with hyphens). `title` is derived from the slug when absent (hyphens to spaces, capitalized). All other fields are omitted from the API payload when absent, preserving any values set in the dashboard.
+All fields are optional. `slug` is derived from the filename when absent (lowercased, special characters replaced with hyphens). `title` is derived from the slug when absent (hyphens to spaces, capitalized). `section` is derived from the parent subdirectory when absent. All other fields are omitted from the API payload when absent, preserving any values set in the dashboard.
 
 `publishedAt` accepts both date-only (`2026-02-17`) and full RFC 3339 (`2026-02-17T00:00:00Z`) formats.
 
@@ -59,10 +75,11 @@ Every file in the batch uses the same content type.
 ## How it works
 
 1. Walks the content directory recursively for `.md` files, skipping hidden entries.
-2. Parses front matter and derives missing slugs and titles from filenames.
-3. Validates content limits and checks for duplicate slugs.
-4. Sends a single `POST /api/v1/public/pages` request with all pages and `build: true`.
-5. Reports results via GitHub Actions annotations.
+2. Derives sections from subdirectory names (overridable via front matter).
+3. Parses front matter and derives missing slugs and titles from filenames.
+4. Validates content limits and checks for duplicate slugs within each section.
+5. Sends a single `POST /api/v1/public/pages` request with all pages and `build: true`.
+6. Reports results via GitHub Actions annotations.
 
 Pages are created or updated by slug. Existing pages not in the batch are left untouched (additive only).
 

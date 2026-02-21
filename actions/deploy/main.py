@@ -88,8 +88,8 @@ def parse_front_matter(raw):
     return attrs, body
 
 
-def slugify(rel_path):
-    name = Path(rel_path).stem.lower()
+def _normalize_slug(name):
+    name = name.lower()
     result = []
     last_was_hyphen = True
     for ch in name:
@@ -109,6 +109,10 @@ def slugify(rel_path):
         if s.endswith("-"):
             s = s[:-1]
     return s
+
+
+def slugify(rel_path):
+    return _normalize_slug(Path(rel_path).stem)
 
 
 def titleize(slug):
@@ -214,6 +218,22 @@ def main():
         slug = attrs.get("slug") or slugify(rel)
         title = attrs.get("title") or titleize(slug)
 
+        # extract section from directory structure
+        parts = Path(rel).parts
+        section = None
+        if len(parts) > 2:
+            warn(
+                f"{rel} is nested more than one level deep; "
+                f"using '{parts[0]}' as section, ignoring deeper nesting",
+                rel,
+            )
+        if len(parts) > 1:
+            section = _normalize_slug(parts[0])
+        if "section" in attrs:
+            section = _normalize_slug(str(attrs["section"]))
+        if section == "":
+            section = None
+
         body_size = len(body.encode("utf-8"))
         title_size = len(title.encode("utf-8"))
 
@@ -240,11 +260,16 @@ def main():
                 error(f"description exceeds 500 byte limit ({desc_size} bytes)", rel)
                 valid = False
 
-        if slug in slugs:
-            error(f'duplicate slug "{slug}", also produced by {slugs[slug]}', rel)
+        dedup_key = f"{section or ''}:{slug}"
+        if dedup_key in slugs:
+            error(
+                f'duplicate slug "{slug}" (section "{section or ""}"),'
+                f" also produced by {slugs[dedup_key]}",
+                rel,
+            )
             valid = False
         else:
-            slugs[slug] = rel
+            slugs[dedup_key] = rel
 
         for ref in find_relative_images(body):
             warn(
@@ -254,6 +279,8 @@ def main():
             )
 
         page = {"slug": slug, "title": title, "content": body, "contentType": content_type}
+        if section:
+            page["section"] = section
         if "description" in attrs:
             page["description"] = attrs["description"]
         if "draft" in attrs:
@@ -294,7 +321,11 @@ def main():
 
     print(f"Syncing {len(entries)} page(s) as {content_type}:")
     for rel, page in entries:
-        print(f"  {rel} to /{content_type}/{page['slug']}")
+        sec = page.get("section")
+        if sec:
+            print(f"  {rel} to /{content_type}/{sec}/{page['slug']}")
+        else:
+            print(f"  {rel} to /{content_type}/{page['slug']}")
 
     if dry_run:
         print("Dry run complete. No changes were made.")
