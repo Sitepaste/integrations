@@ -170,6 +170,42 @@ def find_relative_images(text):
     return refs
 
 
+def fetch_remote_pages(token, content_type, site_id):
+    url = f"{API}?contentType={content_type}"
+    if site_id:
+        url += f"&siteId={site_id}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "Sitepaste-Deploy",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read())
+        except Exception:
+            data = {}
+        die(f"could not list remote pages for prune, api returned {e.code}: {data.get('error', 'unknown error')}")
+    except urllib.error.URLError as e:
+        die(f"could not list remote pages for prune: {e.reason}")
+    except TimeoutError:
+        die("could not list remote pages for prune: request timed out after 120 seconds")
+    return data.get("pages", [])
+
+
+def page_url(content_type, section, slug):
+    if content_type == "standalone":
+        return f"/{section}/{slug}" if section else f"/{slug}"
+    if section:
+        return f"/{content_type}/{section}/{slug}"
+    return f"/{content_type}/{slug}"
+
+
 def walk_md(directory):
     base = Path(directory)
     if not base.is_dir():
@@ -189,6 +225,7 @@ def main():
     content_type = get_input("content-type") or "docs"
     site_id = get_input("site-id")
     dry_run = get_input("dry-run") == "true"
+    prune = get_input("prune") == "true"
 
     if token:
         print(f"::add-mask::{token}")
@@ -321,11 +358,29 @@ def main():
 
     print(f"Syncing {len(entries)} page(s) as {content_type}:")
     for rel, page in entries:
-        sec = page.get("section")
-        if sec:
-            print(f"  {rel} to /{content_type}/{sec}/{page['slug']}")
-        else:
-            print(f"  {rel} to /{content_type}/{page['slug']}")
+        # Standalone pages publish at the root; a section becomes a
+        # custom top-level path: /{section}/{slug}
+        print(f"  {rel} to {page_url(content_type, page.get('section'), page['slug'])}")
+
+    delete_slugs = []
+    if prune:
+        for remote in fetch_remote_pages(token, content_type, site_id):
+            if remote.get("contentType") != content_type:
+                continue
+            key = f"{remote.get('section') or ''}:{remote['slug']}"
+            if key in slugs:
+                continue
+            entry = {"slug": remote["slug"], "contentType": content_type}
+            if remote.get("section"):
+                entry["section"] = remote["section"]
+            delete_slugs.append(entry)
+        if len(delete_slugs) > 5000:
+            die(f"{len(delete_slugs)} pages to prune exceeds the 5000 page limit")
+        if delete_slugs:
+            verb = "Would prune" if dry_run else "Pruning"
+            print(f"{verb} {len(delete_slugs)} page(s) not in {directory}:")
+            for entry in delete_slugs:
+                print(f"  {page_url(content_type, entry.get('section'), entry['slug'])}")
 
     if dry_run:
         print("Dry run complete. No changes were made.")
@@ -333,6 +388,8 @@ def main():
 
     pages = [page for _, page in entries]
     payload = {"pages": pages, "build": True}
+    if delete_slugs:
+        payload["deleteSlugs"] = delete_slugs
     if site_id:
         payload["siteId"] = site_id
 
@@ -372,6 +429,8 @@ def main():
 
     set_output("page-count", len(pages))
     print(f"Synced {len(pages)} page(s) successfully.")
+    if delete_slugs:
+        print(f"Pruned {len(data.get('deleted', []))} page(s).")
 
     build = data.get("build", {})
     if build.get("error"):

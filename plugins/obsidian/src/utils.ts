@@ -34,7 +34,8 @@ export function titleize(slug: string): string {
 
 export function pagePath(contentType: string, slug: string, section?: string): string {
   if (contentType === 'homepage') return '/';
-  if (contentType === 'standalone') return `/${slug}`;
+  // A standalone page's section is a custom top-level path: /{section}/{slug}
+  if (contentType === 'standalone') return section ? `/${section}/${slug}` : `/${slug}`;
   if (section) return `/${contentType}/${section}/${slug}`;
   return `/${contentType}/${slug}`;
 }

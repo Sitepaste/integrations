@@ -26,3 +26,7 @@ npm run lint
 ## Plugins
 
 - [plugins/obsidian](plugins/obsidian) publish markdown notes to Sitepaste directly from Obsidian.
+
+## Shortcuts
+
+- [shortcuts/apple-notes](shortcuts/apple-notes) publish notes from Apple Notes using the Shortcuts app on macOS and iOS.

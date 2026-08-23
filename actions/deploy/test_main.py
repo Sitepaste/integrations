@@ -194,6 +194,7 @@ class TestMain(unittest.TestCase):
         content_type="docs",
         site_id="",
         dry_run="false",
+        prune="false",
     ):
         env = {
             "INPUT_API_TOKEN": token,
@@ -201,6 +202,7 @@ class TestMain(unittest.TestCase):
             "INPUT_CONTENT_TYPE": content_type,
             "INPUT_SITE_ID": site_id,
             "INPUT_DRY_RUN": dry_run,
+            "INPUT_PRUNE": prune,
         }
         clean = {k: v for k, v in os.environ.items() if not k.startswith("INPUT_")}
         clean.update(env)
@@ -532,6 +534,151 @@ class TestMain(unittest.TestCase):
                 ),
             ):
                 main()
+
+
+class TestPrune(unittest.TestCase):
+    _env = staticmethod(TestMain._env)
+
+    @staticmethod
+    def _prune_api(remote_pages, calls):
+        """Mock urlopen: GET /pages returns remote_pages, POST captures its payload."""
+
+        def handler(req, **kw):
+            calls.append(req)
+            if req.get_method() == "GET":
+                return _mock_api({"pages": remote_pages})
+            return _mock_api({"build": {}, "deleted": ["stale"]})
+
+        return handler
+
+    def test_prunes_remote_pages_missing_locally(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            remote = [
+                {"slug": "keep", "contentType": "docs"},
+                {"slug": "stale", "contentType": "docs"},
+                {"slug": "stale-sectioned", "contentType": "docs", "section": "guides"},
+            ]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            self.assertEqual(
+                payload["deleteSlugs"],
+                [
+                    {"slug": "stale", "contentType": "docs"},
+                    {"slug": "stale-sectioned", "contentType": "docs", "section": "guides"},
+                ],
+            )
+
+    def test_matches_by_section_and_slug(self):
+        # A local page in section "guides" must not protect a sectionless
+        # remote page with the same slug, and vice versa.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "guides").mkdir()
+            (Path(d) / "guides" / "setup.md").write_text("---\ntitle: Setup\n---\nbody")
+            remote = [
+                {"slug": "setup", "contentType": "docs"},
+                {"slug": "setup", "contentType": "docs", "section": "guides"},
+            ]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            self.assertEqual(payload["deleteSlugs"], [{"slug": "setup", "contentType": "docs"}])
+
+    def test_ignores_remote_pages_of_other_content_types(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            remote = [{"slug": "a-blog-post", "contentType": "blog"}]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            self.assertNotIn("deleteSlugs", payload)
+
+    def test_omits_delete_slugs_when_nothing_to_prune(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            remote = [{"slug": "keep", "contentType": "docs"}]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            self.assertNotIn("deleteSlugs", payload)
+
+    def test_dry_run_lists_prunes_but_only_calls_get(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            remote = [{"slug": "stale", "contentType": "docs"}]
+            calls = []
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, prune="true", dry_run="true"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            self.assertEqual([req.get_method() for req in calls], ["GET"])
+
+    def test_no_get_request_when_prune_disabled(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api([], calls)),
+            ):
+                main()
+            self.assertEqual([req.get_method() for req in calls], ["POST"])
+
+    def test_get_includes_content_type_and_site_id(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            calls = []
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, content_type="standalone", site_id="site-123", prune="true"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api([], calls)),
+            ):
+                main()
+            get_url = calls[0].full_url
+            self.assertIn("contentType=standalone", get_url)
+            self.assertIn("siteId=site-123", get_url)
+
+    def test_dies_when_listing_remote_pages_fails(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+
+            def handler(req, **kw):
+                raise urllib.error.HTTPError(
+                    req.full_url, 401, "Unauthorized", {}, _mock_api({"error": "invalid token"})
+                )
+
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=handler),
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
 
 
 if __name__ == "__main__":

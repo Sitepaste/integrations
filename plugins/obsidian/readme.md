@@ -54,7 +54,7 @@ publishedAt: 2025-01-15
 | `title` | Page title. Defaults to title-cased filename. |
 | `slug` | URL slug. Defaults to slugified filename. |
 | `contentType` | `docs`, `blog`, `homepage`, or `standalone`. Overrides the default setting. `homepage` must be published individually (not as part of a folder batch) since a site can only have one. |
-| `section` | Optional sub-section for docs and blog pages that creates URLs like `/docs/{section}/{slug}`. The value is normalized to slug format. Vault folder structure is not used for sections so this must be set explicitly. |
+| `section` | Optional section. For docs and blog pages it creates URLs like `/docs/{section}/{slug}`; for standalone pages it becomes a custom top-level path like `/{section}/{slug}` (some names like `docs`, `blog` are reserved). The value is normalized to slug format. Vault folder structure is not used for sections so this must be set explicitly. |
 | `description` | Short description (max 500 bytes). |
 | `draft` | `true` or `false`. |
 | `tags` | Array of tags (max 20, each max 30 chars). |

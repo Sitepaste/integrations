@@ -11,7 +11,7 @@ inputs:
   content-type:
     required: false
     default: 'docs'
-    description: 'Content type for all pages: docs, blog, or standalone'
+    description: 'Content type for all pages: docs, blog, or standalone. Subdirectories become sections: /docs/{section}/{slug} for docs and blog, /{section}/{slug} for standalone.'
   site-id:
     required: false
     description: 'Target site UUID'
@@ -19,6 +19,10 @@ inputs:
     required: false
     default: 'false'
     description: 'Validate and preview without syncing or building'
+  prune:
+    required: false
+    default: 'false'
+    description: 'Delete pages of this content type that exist on the site but not in the content directory, making the directory the single source of truth. Only pages matching content-type are ever deleted. With dry-run, lists the pages that would be deleted.'
 outputs:
   page-count:
     description: 'Number of pages synced'
@@ -38,3 +42,4 @@ runs:
         INPUT_CONTENT_TYPE: ${{ inputs.content-type }}
         INPUT_SITE_ID: ${{ inputs.site-id }}
         INPUT_DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_PRUNE: ${{ inputs.prune }}
