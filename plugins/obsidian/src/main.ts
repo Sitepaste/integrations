@@ -197,7 +197,9 @@ export default class SitepastePlugin extends Plugin {
       // Check duplicate slugs within the same content type
       const slugKeys = new Map<string, string>();
       for (const info of infos) {
-        const key = `${info.contentType}:${info.section ?? ''}:${info.slug}`;
+        // Keyed on the lowercase section slug the server stores, so two notes
+        // whose sections differ only in casing still collide.
+        const key = `${info.contentType}:${info.section?.toLowerCase() ?? ''}:${info.slug}`;
         const existing = slugKeys.get(key);
         if (existing) {
           this.publishing = false;

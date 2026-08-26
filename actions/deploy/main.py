@@ -88,14 +88,15 @@ def parse_front_matter(raw):
     return attrs, body
 
 
-def _normalize_slug(name):
-    name = name.lower()
+def _normalize_slug(name, keep_case=False):
+    if not keep_case:
+        name = name.lower()
     result = []
     last_was_hyphen = True
     for ch in name:
         if ch == "'":
             continue
-        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+        if ("a" <= ch <= "z") or ("A" <= ch <= "Z") or ("0" <= ch <= "9"):
             result.append(ch)
             last_was_hyphen = False
         elif not last_was_hyphen:
@@ -113,6 +114,21 @@ def _normalize_slug(name):
 
 def slugify(rel_path):
     return _normalize_slug(Path(rel_path).stem)
+
+
+def normalize_section(value, keep_case=False):
+    """Normalize a section path per slash-separated segment, so a nested
+    standalone section ("api/builds") keeps its separator instead of having
+    it collapsed into a hyphen. Empty segments (leading, trailing, or doubled
+    slashes) drop out. Whether nesting is allowed at all is the caller's
+    check — docs and blog sections stay single-segment.
+
+    With keep_case, casing survives ("API/Builds"): the server lowercases it
+    into the stored slug and captures the typed casing as the section's
+    display title, the same way the dashboard picker does — so a directory
+    named API/ labels the section "API", not the titleized "Api"."""
+    segments = (_normalize_slug(p, keep_case) for p in str(value).split("/"))
+    return "/".join(s for s in segments if s)
 
 
 def titleize(slug):
@@ -255,21 +271,43 @@ def main():
         slug = attrs.get("slug") or slugify(rel)
         title = attrs.get("title") or titleize(slug)
 
-        # extract section from directory structure
-        parts = Path(rel).parts
+        # extract section from directory structure. Standalone sections may
+        # nest one level (api/builds/x.md -> section "api/builds"), matching
+        # the depth docs/blog reach via their content-type prefix — which is
+        # also why docs/blog directories stay single-level.
+        dirs = Path(rel).parts[:-1]
+        max_section_dirs = 2 if content_type == "standalone" else 1
         section = None
-        if len(parts) > 2:
+        if len(dirs) > max_section_dirs:
+            used = "/".join(dirs[:max_section_dirs])
+            depth = "one level" if max_section_dirs == 1 else "two levels"
             warn(
-                f"{rel} is nested more than one level deep; "
-                f"using '{parts[0]}' as section, ignoring deeper nesting",
+                f"{rel} is nested more than {depth} deep; "
+                f"using '{used}' as section, ignoring deeper nesting",
                 rel,
             )
-        if len(parts) > 1:
-            section = _normalize_slug(parts[0])
+        # Casing survives into the payload ("API/Builds"): the server stores
+        # the lowercase slug and captures the typed casing as the section's
+        # display title (where none is set yet). Local dedup and prune
+        # matching key on the lowercase slug, which is what the API returns.
+        if dirs:
+            section = normalize_section("/".join(dirs[:max_section_dirs]), keep_case=True)
         if "section" in attrs:
-            section = _normalize_slug(str(attrs["section"]))
+            section = normalize_section(str(attrs["section"]), keep_case=True)
         if section == "":
             section = None
+        section_key = section.lower() if section else None
+        if section is not None and section.count("/") + 1 > max_section_dirs:
+            # Only reachable via front matter — the directory path is capped
+            # above. Caught locally so the run fails with the file named,
+            # instead of a server-side validation error.
+            what = (
+                f"{content_type} sections cannot nest"
+                if max_section_dirs == 1
+                else "standalone sections nest at most one level"
+            )
+            error(f'section "{section}" is invalid: {what}', rel)
+            valid = False
 
         body_size = len(body.encode("utf-8"))
         title_size = len(title.encode("utf-8"))
@@ -297,7 +335,7 @@ def main():
                 error(f"description exceeds 500 byte limit ({desc_size} bytes)", rel)
                 valid = False
 
-        dedup_key = f"{section or ''}:{slug}"
+        dedup_key = f"{section_key or ''}:{slug}"
         if dedup_key in slugs:
             error(
                 f'duplicate slug "{slug}" (section "{section or ""}"),'
@@ -326,7 +364,11 @@ def main():
             raw_tags = attrs["tags"]
             if not isinstance(raw_tags, list):
                 raw_tags = [raw_tags]
-            tags = [str(t).lower().strip() for t in raw_tags if str(t).strip()]
+            # Typed casing survives ("iOS"): the server stores the lowercase
+            # slug and captures the casing as the tag's display title (where
+            # none is set yet), matching the dashboard. Validation runs on
+            # the lowercase form the server will store.
+            tags = [str(t).strip() for t in raw_tags if str(t).strip()]
             if len(tags) > MAX_TAGS_COUNT:
                 error(f"too many tags ({len(tags)}, max {MAX_TAGS_COUNT})", rel)
                 valid = False
@@ -334,7 +376,7 @@ def main():
                 if len(tag) > MAX_TAG_LENGTH:
                     error(f'tag "{tag}" exceeds {MAX_TAG_LENGTH} character limit', rel)
                     valid = False
-                elif not is_valid_tag(tag):
+                elif not is_valid_tag(tag.lower()):
                     error(f'tag "{tag}" contains invalid characters', rel)
                     valid = False
             if tags:
@@ -360,7 +402,8 @@ def main():
     for rel, page in entries:
         # Standalone pages publish at the root; a section becomes a
         # custom top-level path: /{section}/{slug}
-        print(f"  {rel} to {page_url(content_type, page.get('section'), page['slug'])}")
+        section_slug = (page.get("section") or "").lower() or None
+        print(f"  {rel} to {page_url(content_type, section_slug, page['slug'])}")
 
     delete_slugs = []
     if prune:

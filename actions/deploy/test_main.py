@@ -11,6 +11,7 @@ from unittest.mock import patch
 from main import (
     get_input,
     main,
+    normalize_section,
     parse_front_matter,
     set_output,
     slugify,
@@ -114,6 +115,28 @@ class TestSlugify(unittest.TestCase):
         result = slugify(name)
         self.assertLessEqual(len(result), 100)
         self.assertFalse(result.endswith("-"))
+
+
+class TestNormalizeSection(unittest.TestCase):
+    def test_keeps_a_single_slash_for_nesting(self):
+        self.assertEqual(normalize_section("api/builds"), "api/builds")
+
+    def test_normalizes_each_segment(self):
+        self.assertEqual(normalize_section("API/Post Builds"), "api/post-builds")
+
+    def test_drops_empty_segments(self):
+        self.assertEqual(normalize_section("/api"), "api")
+        self.assertEqual(normalize_section("api/"), "api")
+        self.assertEqual(normalize_section("api//builds"), "api/builds")
+
+    def test_flat_sections_are_unchanged(self):
+        self.assertEqual(normalize_section("guides"), "guides")
+
+    def test_keep_case_preserves_typed_casing(self):
+        # The server lowercases this into the slug and captures the casing
+        # as the section's display title.
+        self.assertEqual(normalize_section("API/Builds", keep_case=True), "API/Builds")
+        self.assertEqual(normalize_section("API v2", keep_case=True), "API-v2")
 
 
 class TestTitleize(unittest.TestCase):
@@ -360,6 +383,135 @@ class TestMain(unittest.TestCase):
                 main()
             self.assertEqual(captured["payload"]["pages"][0]["publishedAt"], ts)
 
+    def test_directory_becomes_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "guides").mkdir()
+            (Path(d) / "guides" / "setup.md").write_text("---\ntitle: Setup\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "guides")
+
+    def test_standalone_nested_directory_becomes_nested_section(self):
+        # A second directory level maps to a nested standalone section
+        # ("api/builds"), the same depth docs/blog reach via their
+        # content-type prefix.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "api" / "builds").mkdir(parents=True)
+            (Path(d) / "api" / "builds" / "post-builds.md").write_text(
+                "---\ntitle: POST /builds\n---\nbody"
+            )
+            captured = {}
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, content_type="standalone"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "api/builds")
+
+    def test_docs_nested_directory_keeps_top_level_section_with_warning(self):
+        # Docs and blog spend their nesting level on the content-type prefix,
+        # so a second directory level is ignored, not mapped.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "guides" / "advanced").mkdir(parents=True)
+            (Path(d) / "guides" / "advanced" / "setup.md").write_text(
+                "---\ntitle: Setup\n---\nbody"
+            )
+            captured = {}
+            stdout = io.StringIO()
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+                patch("sys.stdout", stdout),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "guides")
+            self.assertIn("::warning", stdout.getvalue())
+
+    def test_standalone_third_directory_level_is_ignored_with_warning(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "api" / "builds" / "deep").mkdir(parents=True)
+            (Path(d) / "api" / "builds" / "deep" / "x.md").write_text("---\ntitle: X\n---\nbody")
+            captured = {}
+            stdout = io.StringIO()
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, content_type="standalone"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+                patch("sys.stdout", stdout),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "api/builds")
+            self.assertIn("::warning", stdout.getvalue())
+
+    def test_directory_casing_is_preserved_in_payload(self):
+        # A directory named API/ should label the section "API", not the
+        # titleized "Api" — the server captures typed casing from the section
+        # value, so the action must not lowercase it away.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "API" / "Builds").mkdir(parents=True)
+            (Path(d) / "API" / "Builds" / "post-builds.md").write_text(
+                "---\ntitle: POST /builds\n---\nbody"
+            )
+            captured = {}
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, content_type="standalone"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "API/Builds")
+
+    def test_front_matter_section_may_nest_for_standalone(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.md").write_text("---\ntitle: X\nsection: api/builds\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(
+                    os.environ,
+                    self._env(content_dir=d, content_type="standalone"),
+                    clear=True,
+                ),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["section"], "api/builds")
+
+    def test_front_matter_nested_section_fails_for_docs(self):
+        # Caught locally so the run fails with the file named, instead of a
+        # server-side validation error.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.md").write_text("---\ntitle: X\nsection: guides/advanced\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_front_matter_section_deeper_than_two_levels_fails_for_standalone(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "x.md").write_text("---\ntitle: X\nsection: a/b/c\n---\nbody")
+            with patch.dict(
+                os.environ,
+                self._env(content_dir=d, content_type="standalone"),
+                clear=True,
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
     def test_includes_site_id_in_payload_when_provided(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
@@ -510,16 +662,28 @@ class TestMain(unittest.TestCase):
                     main()
                 self.assertEqual(ctx.exception.code, 1)
 
-    def test_normalizes_tags_to_lowercase(self):
+    def test_tag_casing_is_preserved_in_payload(self):
+        # Typed casing reaches the server, which stores the lowercase slug
+        # and captures the casing as the tag's display title — writing "iOS"
+        # must display as iOS, not "ios". Validation still runs on the
+        # lowercase form, so invalid characters are caught either way.
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "post.md").write_text("---\ntags: [Python, TEST]\n---\nbody")
+            (Path(d) / "post.md").write_text("---\ntags: [iOS, python]\n---\nbody")
             captured = {}
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
                 patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
             ):
                 main()
-            self.assertEqual(captured["payload"]["pages"][0]["tags"], ["python", "test"])
+            self.assertEqual(captured["payload"]["pages"][0]["tags"], ["iOS", "python"])
+
+    def test_invalid_tag_characters_fail_regardless_of_case(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntags: [C++]\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
 
     def test_build_warning_does_not_fail_action(self):
         with tempfile.TemporaryDirectory() as d:
@@ -592,6 +756,22 @@ class TestPrune(unittest.TestCase):
                 main()
             payload = json.loads(calls[-1].data)
             self.assertEqual(payload["deleteSlugs"], [{"slug": "setup", "contentType": "docs"}])
+
+    def test_matches_sections_case_insensitively(self):
+        # The API returns lowercase section slugs; a cased local directory
+        # (Guides/) must still protect its remote page from pruning.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "Guides").mkdir()
+            (Path(d) / "Guides" / "setup.md").write_text("---\ntitle: Setup\n---\nbody")
+            remote = [{"slug": "setup", "contentType": "docs", "section": "guides"}]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            self.assertNotIn("deleteSlugs", payload)
 
     def test_ignores_remote_pages_of_other_content_types(self):
         with tempfile.TemporaryDirectory() as d:

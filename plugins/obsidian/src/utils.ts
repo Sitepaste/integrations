@@ -1,9 +1,10 @@
-export function slugify(name: string): string {
+export function slugify(name: string, keepCase = false): string {
   let result = '';
   let lastWasHyphen = true;
-  for (const ch of name.toLowerCase()) {
+  for (const ch of keepCase ? name : name.toLowerCase()) {
     if (ch === "'") continue;
-    const isAlphaNum = (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
+    const isAlphaNum =
+      (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9');
     if (isAlphaNum) {
       result += ch;
       lastWasHyphen = false;
@@ -24,6 +25,22 @@ export function slugify(name: string): string {
   return result;
 }
 
+/**
+ * Normalize a section path per slash-separated segment, so a nested
+ * standalone section ("api/builds") keeps its separator. Empty segments
+ * (leading, trailing, or doubled slashes) drop out. With keepCase, typed
+ * casing survives ("API/Builds"): the server lowercases it into the stored
+ * slug and captures the casing as the section's display title, the same way
+ * the dashboard does.
+ */
+export function normalizeSection(value: string, keepCase = false): string {
+  return String(value)
+    .split('/')
+    .map((segment) => slugify(segment, keepCase))
+    .filter((segment) => segment.length > 0)
+    .join('/');
+}
+
 export function titleize(slug: string): string {
   return slug
     .split('-')
@@ -33,6 +50,9 @@ export function titleize(slug: string): string {
 }
 
 export function pagePath(contentType: string, slug: string, section?: string): string {
+  // The section may carry typed casing ("API/Builds" — display intent the
+  // server captures as a title); the published URL uses its lowercase slug.
+  section = section?.toLowerCase();
   if (contentType === 'homepage') return '/';
   // A standalone page's section is a custom top-level path: /{section}/{slug}
   if (contentType === 'standalone') return section ? `/${section}/${slug}` : `/${slug}`;
@@ -70,9 +90,19 @@ function isValidSlug(slug: string): boolean {
   return true;
 }
 
-function isValidSection(section: string): boolean {
-  if (!isValidSlug(section)) return false;
-  return !section.includes('--');
+// Sections validate on their lowercase form — the slug the server stores —
+// since typed casing is display intent, not part of the slug. Standalone
+// sections may nest one level ("api/builds"); docs and blog spend their
+// nesting level on the content-type prefix.
+function isValidSection(section: string, allowNesting: boolean): boolean {
+  const segments = section.toLowerCase().split('/');
+  if (segments.length > (allowNesting ? 2 : 1)) return false;
+  for (const segment of segments) {
+    if (segment.length === 0 || segment.length > MAX_SLUG_LENGTH) return false;
+    if (!isValidSlug(segment)) return false;
+    if (segment.includes('--')) return false;
+  }
+  return true;
 }
 
 function isValidTag(tag: string): boolean {
@@ -87,6 +117,7 @@ export function validatePage(page: {
   slug: string;
   title: string;
   content: string;
+  contentType?: string;
   section?: string;
   description?: string;
   tags?: string[];
@@ -110,16 +141,13 @@ export function validatePage(page: {
   }
 
   if (page.section) {
-    if (page.section.length > MAX_SLUG_LENGTH) {
-      errors.push({
-        field: 'section',
-        message: `section exceeds ${MAX_SLUG_LENGTH} character limit (${page.section.length} chars)`,
-      });
-    } else if (!isValidSection(page.section)) {
+    if (!isValidSection(page.section, page.contentType === 'standalone')) {
       errors.push({
         field: 'section',
         message:
-          'section must contain only lowercase letters, numbers, and hyphens, must start and end with a letter or number, and must not contain consecutive hyphens',
+          page.contentType === 'standalone'
+            ? 'section must be one or two slash-separated names of letters, numbers, and hyphens, each starting and ending with a letter or number, without consecutive hyphens'
+            : 'section must contain only letters, numbers, and hyphens, must start and end with a letter or number, and must not contain consecutive hyphens (only standalone sections can nest)',
       });
     }
   }
@@ -186,10 +214,12 @@ export function validatePage(page: {
           field: 'tags',
           message: `tag "${tag}" exceeds ${MAX_TAG_LENGTH} character limit`,
         });
-      } else if (!isValidTag(tag)) {
+      } else if (!isValidTag(tag.toLowerCase())) {
+        // Validated on the lowercase form the server stores; typed casing
+        // ("iOS") is captured server-side as the tag's display title.
         errors.push({
           field: 'tags',
-          message: `tag "${tag}" contains invalid characters (only lowercase letters, numbers, spaces, and hyphens allowed)`,
+          message: `tag "${tag}" contains invalid characters (only letters, numbers, spaces, and hyphens allowed)`,
         });
       }
     }

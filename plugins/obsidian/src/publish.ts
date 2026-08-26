@@ -2,6 +2,7 @@ import { App, TFile, TFolder } from 'obsidian';
 import type { PagePayload, PublishResponse } from './api';
 import {
   byteLen,
+  normalizeSection,
   slugify,
   titleize,
   validatePage,
@@ -80,14 +81,17 @@ export async function prepareFile(
   const description = typeof fm['description'] === 'string' ? fm['description'] : undefined;
   const draft = typeof fm['draft'] === 'boolean' ? fm['draft'] : undefined;
 
-  // extract section from frontmatter Obsidian folder structure is not used for sections
+  // extract section from frontmatter Obsidian folder structure is not used
+  // for sections. Casing survives ("API/Builds", "iOS"): the server stores
+  // the lowercase slug and captures the typed casing as the section/tag
+  // display title (where none is set yet), matching the dashboard.
   const rawSection = fm['section'];
-  const section = rawSection ? slugify(String(rawSection)) || undefined : undefined;
+  const section = rawSection ? normalizeSection(String(rawSection), true) || undefined : undefined;
 
   let tags: string[] | undefined;
   if (fm['tags']) {
     const rawTags: unknown[] = Array.isArray(fm['tags']) ? fm['tags'] : [fm['tags']];
-    tags = rawTags.map((t) => String(t).toLowerCase().trim()).filter((t) => t.length > 0);
+    tags = rawTags.map((t) => String(t).trim()).filter((t) => t.length > 0);
   }
 
   let publishedAt: string | undefined;
@@ -102,7 +106,16 @@ export async function prepareFile(
 
   const isUpdate = !!fm['sitepaste-slug'];
 
-  const errors = validatePage({ slug, title, content, section, description, tags, publishedAt });
+  const errors = validatePage({
+    slug,
+    title,
+    content,
+    contentType,
+    section,
+    description,
+    tags,
+    publishedAt,
+  });
   if (fmContentType && !VALID_CONTENT_TYPES.has(fmContentType)) {
     errors.push({
       field: 'contentType',

@@ -13,5 +13,9 @@
 		"isolatedModules": true,
 		"lib": ["ES2018", "DOM"]
 	},
-	"include": ["src/**/*.ts"]
+	"include": ["src/**/*.ts"],
+	// Tests run on Node's built-in runner (node --test) with native type
+	// stripping and use node: builtins, which this browser-lib config has no
+	// types for. They are validated by running them, not by this typecheck.
+	"exclude": ["src/**/*.test.ts"]
 }

@@ -46,9 +46,22 @@ handbook/
   benefits.md                   (/handbook/benefits)
 ```
 
-Standalone sections get their own styled landing page (`/handbook/`) and appear in the site navigation. Names that collide with existing root paths (`docs`, `blog`, `tags`, `media`, and a few others) are rejected, as are section names that match an existing root-level page slug on the site.
+Standalone sections get their own styled landing page (`/handbook/`) and appear in the site navigation. Names that collide with existing root paths (`docs`, `blog`, `tags`, `media`, and a few others) are rejected, as are section names that match an existing root-level page slug on the site. Only the first directory level is checked against reserved names — `api/media/` is fine, because only `api` claims a top-level path.
 
-Pages with the same slug in different sections are allowed. Only one level of nesting is used; deeper subdirectories use the first directory as the section and emit a warning. A `section` field in front matter overrides the directory derived section.
+Standalone sections may nest one level: a second directory becomes a sub-section, reaching the same depth docs and blog get from their content-type prefix.
+
+```
+api/
+  overview.md                   (/api/overview)
+  builds/
+    post-builds.md              (/api/builds/post-builds)
+```
+
+Both levels get a landing page, and the sub-section appears in the navigation as a collapsible group inside its parent.
+
+Pages with the same slug in different sections are allowed. Directories beyond the supported depth (one level for `docs` and `blog`, two for `standalone`) are ignored for the section, with a warning. A `section` field in front matter overrides the directory derived section and may itself be a nested path (`api/builds`) for standalone pages.
+
+Directory casing carries through as the section's display name: a directory named `API/` publishes at `/api/` and displays as "API" in the site navigation, the same way typed casing works in the dashboard. Captured casing only fills in a display name where none is set yet — a rename made in the dashboard survives every deploy.
 
 ## Front matter
 
@@ -71,6 +84,8 @@ Your content here...
 All fields are optional. `slug` is derived from the filename when absent (lowercased, special characters replaced with hyphens). `title` is derived from the slug when absent (hyphens to spaces, capitalized). `section` is derived from the parent subdirectory when absent. All other fields are omitted from the API payload when absent, preserving any values set in the dashboard.
 
 `publishedAt` accepts both date-only (`2026-02-17`) and full RFC 3339 (`2026-02-17T00:00:00Z`) formats.
+
+Tag casing is kept as the display name, the same way section directory casing is: a tag written as `iOS` is stored as `ios` and displays as iOS on the site. Captured casing fills a display name only where none is set yet.
 
 ## Content types
 
