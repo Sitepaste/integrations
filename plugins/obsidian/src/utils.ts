@@ -64,6 +64,8 @@ export const MAX_SLUG_LENGTH = 100;
 export const MAX_TITLE_LENGTH = 200; // bytes
 export const MAX_CONTENT_LENGTH = 100_000; // bytes
 export const MAX_DESCRIPTION_LENGTH = 500; // bytes
+export const MAX_API_ENDPOINT_LENGTH = 200;
+export const API_ENDPOINT_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
 export const MAX_TAGS_COUNT = 20;
 export const MAX_TAG_LENGTH = 30;
 
@@ -120,6 +122,7 @@ export function validatePage(page: {
   contentType?: string;
   section?: string;
   description?: string;
+  apiEndpoint?: string;
   tags?: string[];
   publishedAt?: string;
 }): ValidationError[] {
@@ -178,6 +181,21 @@ export function validatePage(page: {
       errors.push({
         field: 'description',
         message: `description exceeds ${MAX_DESCRIPTION_LENGTH} byte limit (${descBytes} bytes)`,
+      });
+    }
+  }
+
+  if (page.apiEndpoint) {
+    const method = page.apiEndpoint.split(' ')[0].toUpperCase();
+    if (!API_ENDPOINT_METHODS.includes(method)) {
+      errors.push({
+        field: 'api_endpoint',
+        message: `api_endpoint must start with an HTTP method (${API_ENDPOINT_METHODS.join(', ')})`,
+      });
+    } else if (page.apiEndpoint.length > MAX_API_ENDPOINT_LENGTH) {
+      errors.push({
+        field: 'api_endpoint',
+        message: `api_endpoint exceeds ${MAX_API_ENDPOINT_LENGTH} character limit (${page.apiEndpoint.length} chars)`,
       });
     }
   }

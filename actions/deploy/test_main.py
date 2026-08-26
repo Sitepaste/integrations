@@ -555,6 +555,29 @@ class TestMain(unittest.TestCase):
             self.assertIs(page["draft"], False)
             self.assertEqual(page["tags"], ["python", "test"])
 
+    def test_maps_api_endpoint_to_page_payload(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text(
+                "---\ntitle: List pages\napi_endpoint: GET /pages\n---\nbody"
+            )
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["apiEndpoint"], "GET /pages")
+
+    def test_rejects_api_endpoint_without_http_method(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text(
+                "---\ntitle: X\napi_endpoint: FETCH /pages\n---\nbody"
+            )
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
     def test_sets_outputs_on_successful_deploy(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")

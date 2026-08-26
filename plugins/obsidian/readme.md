@@ -56,6 +56,7 @@ publishedAt: 2025-01-15
 | `contentType` | `docs`, `blog`, `homepage`, or `standalone`. Overrides the default setting. `homepage` must be published individually (not as part of a folder batch) since a site can only have one. |
 | `section` | Optional section. For docs and blog pages it creates URLs like `/docs/{section}/{slug}`; for standalone pages it becomes a custom top-level path like `/{section}/{slug}` (some names like `docs`, `blog` are reserved). The value is normalized to slug format. Vault folder structure is not used for sections so this must be set explicitly. |
 | `description` | Short description (max 500 bytes). |
+| `api_endpoint` | Marks the page as an API reference: an HTTP method optionally followed by a path, like `GET /pages/{slug}` (max 200 chars). The method shows as a badge next to the page in the site navigation. |
 | `draft` | `true` or `false`. |
 | `tags` | Array of tags (max 20, each max 30 chars). |
 | `publishedAt` | ISO date or datetime. Also reads `date`. |

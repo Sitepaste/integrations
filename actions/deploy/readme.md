@@ -76,6 +76,7 @@ description: A guide to getting started
 tags: [guides, setup]
 draft: false
 publishedAt: 2026-02-17
+api_endpoint: GET /pages/{slug}
 ---
 
 Your content here...
@@ -84,6 +85,8 @@ Your content here...
 All fields are optional. `slug` is derived from the filename when absent (lowercased, special characters replaced with hyphens). `title` is derived from the slug when absent (hyphens to spaces, capitalized). `section` is derived from the parent subdirectory when absent. All other fields are omitted from the API payload when absent, preserving any values set in the dashboard.
 
 `publishedAt` accepts both date-only (`2026-02-17`) and full RFC 3339 (`2026-02-17T00:00:00Z`) formats.
+
+`api_endpoint` marks the page as an API reference: an HTTP method optionally followed by a path (max 200 chars). The method shows as a badge next to the page in the site navigation.
 
 Tag casing is kept as the display name, the same way section directory casing is: a tag written as `iOS` is stored as `ios` and displays as iOS on the site. Captured casing fills a display name only where none is set yet.
 

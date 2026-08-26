@@ -20,6 +20,7 @@ export interface FilePublishInfo {
   contentType: string;
   section?: string;
   description?: string;
+  apiEndpoint?: string;
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
@@ -79,6 +80,8 @@ export async function prepareFile(
   }
 
   const description = typeof fm['description'] === 'string' ? fm['description'] : undefined;
+  const rawApiEndpoint = fm['api_endpoint'] ?? fm['apiEndpoint'];
+  const apiEndpoint = typeof rawApiEndpoint === 'string' ? rawApiEndpoint.trim() : undefined;
   const draft = typeof fm['draft'] === 'boolean' ? fm['draft'] : undefined;
 
   // extract section from frontmatter Obsidian folder structure is not used
@@ -113,6 +116,7 @@ export async function prepareFile(
     contentType,
     section,
     description,
+    apiEndpoint,
     tags,
     publishedAt,
   });
@@ -131,6 +135,7 @@ export async function prepareFile(
     contentType,
     section,
     description,
+    apiEndpoint,
     draft,
     tags,
     publishedAt,
@@ -153,6 +158,7 @@ export async function doPublish(
     };
     if (info.section) page.section = info.section;
     if (info.description !== undefined) page.description = info.description;
+    if (info.apiEndpoint !== undefined && info.apiEndpoint !== '') page.apiEndpoint = info.apiEndpoint;
     if (info.draft !== undefined) page.draft = info.draft;
     if (info.tags) page.tags = info.tags;
     if (info.publishedAt) page.publishedAt = info.publishedAt;

@@ -11,6 +11,7 @@ API = "https://sitepaste.com/api/v1/public/pages"
 TYPES = {"docs", "blog", "standalone"}
 MAX_SLUG_LENGTH = 100
 MAX_TAGS_COUNT = 20
+API_ENDPOINT_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 MAX_TAG_LENGTH = 30
 
 
@@ -334,6 +335,19 @@ def main():
             if desc_size > 500:
                 error(f"description exceeds 500 byte limit ({desc_size} bytes)", rel)
                 valid = False
+        api_endpoint = str(attrs.get("api_endpoint") or "").strip()
+        if api_endpoint:
+            method = api_endpoint.split(" ", 1)[0].upper()
+            if method not in API_ENDPOINT_METHODS:
+                error(
+                    f'api_endpoint "{api_endpoint}" must start with an HTTP method '
+                    f"({', '.join(sorted(API_ENDPOINT_METHODS))})",
+                    rel,
+                )
+                valid = False
+            elif len(api_endpoint) > 200:
+                error(f"api_endpoint exceeds 200 character limit ({len(api_endpoint)} chars)", rel)
+                valid = False
 
         dedup_key = f"{section_key or ''}:{slug}"
         if dedup_key in slugs:
@@ -358,6 +372,8 @@ def main():
             page["section"] = section
         if "description" in attrs:
             page["description"] = attrs["description"]
+        if api_endpoint:
+            page["apiEndpoint"] = api_endpoint
         if "draft" in attrs:
             page["draft"] = attrs["draft"]
         if attrs.get("tags"):

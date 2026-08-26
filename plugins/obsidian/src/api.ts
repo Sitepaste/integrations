@@ -10,6 +10,7 @@ export interface PagePayload {
   contentType: string;
   section?: string;
   description?: string;
+  apiEndpoint?: string;
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
