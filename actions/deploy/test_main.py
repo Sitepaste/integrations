@@ -974,5 +974,81 @@ class TestPassthroughFields(unittest.TestCase):
             self.assertNotIn(field, page)
 
 
+class TestContentTypeFrontMatter(unittest.TestCase):
+    _env = staticmethod(TestMain._env)
+    _capture_payload = staticmethod(TestMain._capture_payload)
+
+    def _publish_files(self, files):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, content in files.items():
+                path = Path(d) / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            return captured["payload"]["pages"]
+
+    def _fails_validation(self, files):
+        with tempfile.TemporaryDirectory() as d:
+            for rel, content in files.items():
+                path = Path(d) / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content)
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_homepage_front_matter_publishes_the_site_homepage(self):
+        pages = self._publish_files(
+            {
+                "index.md": "---\ntitle: Docs\ncontentType: homepage\n---\nWelcome",
+                "guide.md": "---\ntitle: Guide\n---\nbody",
+            }
+        )
+        by_type = {p["contentType"]: p for p in pages}
+        self.assertEqual(by_type["homepage"]["slug"], "index")
+        self.assertEqual(by_type["homepage"]["title"], "Docs")
+        # The rest of the directory keeps the run's content type.
+        self.assertIn("docs", by_type)
+
+    def test_homepage_in_a_subdirectory_fails(self):
+        self._fails_validation(
+            {
+                "guides/home.md": "---\ntitle: Docs\ncontentType: homepage\n---\nWelcome",
+            }
+        )
+
+    def test_two_homepages_fail(self):
+        self._fails_validation(
+            {
+                "a.md": "---\ntitle: A\ncontentType: homepage\n---\nx",
+                "b.md": "---\ntitle: B\ncontentType: homepage\n---\ny",
+            }
+        )
+
+    def test_per_file_content_type_is_honored(self):
+        pages = self._publish_files(
+            {
+                "post.md": "---\ntitle: P\ncontentType: blog\n---\nx",
+                "guide.md": "---\ntitle: G\n---\ny",
+            }
+        )
+        by_slug = {p["slug"]: p for p in pages}
+        self.assertEqual(by_slug["post"]["contentType"], "blog")
+        self.assertEqual(by_slug["guide"]["contentType"], "docs")
+
+    def test_unknown_content_type_fails(self):
+        self._fails_validation(
+            {
+                "post.md": "---\ntitle: P\ncontentType: article\n---\nx",
+            }
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

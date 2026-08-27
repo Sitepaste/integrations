@@ -260,6 +260,8 @@ def fetch_remote_pages(token, content_type, site_id):
 
 
 def page_url(content_type, section, slug):
+    if content_type == "homepage":
+        return "/"
     if content_type == "standalone":
         return f"/{section}/{slug}" if section else f"/{slug}"
     if section:
@@ -313,7 +315,26 @@ def main():
         raw = full.read_text(encoding="utf-8")
 
         attrs, body = parse_front_matter(raw)
+
+        # Per-file contentType, exactly as the pages API and the Obsidian
+        # plugin take it; the content-type input is only the default for
+        # files that don't set one.
+        file_content_type = content_type
+        fm_content_type = str(attrs.get("contentType") or "").strip()
+        if fm_content_type:
+            if fm_content_type in TYPES or fm_content_type == "homepage":
+                file_content_type = fm_content_type
+            else:
+                error(
+                    f'contentType "{fm_content_type}" must be one of'
+                    " docs, blog, standalone, or homepage",
+                    rel,
+                )
+                valid = False
+
         slug = attrs.get("slug") or slugify(rel)
+        if file_content_type == "homepage":
+            slug = "index"  # the homepage's fixed slug, as in the dashboard
         title = attrs.get("title") or titleize(slug)
 
         # extract section from directory structure. Standalone sections may
@@ -321,7 +342,7 @@ def main():
         # the depth docs/blog reach via their content-type prefix — which is
         # also why docs/blog directories stay single-level.
         dirs = Path(rel).parts[:-1]
-        max_section_dirs = 2 if content_type == "standalone" else 1
+        max_section_dirs = 2 if file_content_type == "standalone" else 1
         section = None
         if len(dirs) > max_section_dirs:
             used = "/".join(dirs[:max_section_dirs])
@@ -341,13 +362,17 @@ def main():
             section = normalize_section(str(attrs["section"]), keep_case=True)
         if section == "":
             section = None
+        if file_content_type == "homepage" and section is not None:
+            error("a homepage cannot have a section; move the file to the content root", rel)
+            valid = False
+            section = None
         section_key = section.lower() if section else None
         if section is not None and section.count("/") + 1 > max_section_dirs:
             # Only reachable via front matter — the directory path is capped
             # above. Caught locally so the run fails with the file named,
             # instead of a server-side validation error.
             what = (
-                f"{content_type} sections cannot nest"
+                f"{file_content_type} sections cannot nest"
                 if max_section_dirs == 1
                 else "standalone sections nest at most one level"
             )
@@ -393,7 +418,7 @@ def main():
                 error(f"api_endpoint exceeds 200 character limit ({len(api_endpoint)} chars)", rel)
                 valid = False
 
-        dedup_key = f"{section_key or ''}:{slug}"
+        dedup_key = f"{file_content_type}:{section_key or ''}:{slug}"
         if dedup_key in slugs:
             error(
                 f'duplicate slug "{slug}" (section "{section or ""}"),'
@@ -411,7 +436,7 @@ def main():
                 rel,
             )
 
-        page = {"slug": slug, "title": title, "content": body, "contentType": content_type}
+        page = {"slug": slug, "title": title, "content": body, "contentType": file_content_type}
         if section:
             page["section"] = section
         if "description" in attrs:
@@ -520,14 +545,14 @@ def main():
         # Standalone pages publish at the root; a section becomes a
         # custom top-level path: /{section}/{slug}
         section_slug = (page.get("section") or "").lower() or None
-        print(f"  {rel} to {page_url(content_type, section_slug, page['slug'])}")
+        print(f"  {rel} to {page_url(page['contentType'], section_slug, page['slug'])}")
 
     delete_slugs = []
     if prune:
         for remote in fetch_remote_pages(token, content_type, site_id):
             if remote.get("contentType") != content_type:
                 continue
-            key = f"{remote.get('section') or ''}:{remote['slug']}"
+            key = f"{content_type}:{remote.get('section') or ''}:{remote['slug']}"
             if key in slugs:
                 continue
             entry = {"slug": remote["slug"], "contentType": content_type}

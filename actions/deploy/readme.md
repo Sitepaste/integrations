@@ -88,6 +88,8 @@ All fields are optional. `slug` is derived from the filename when absent (lowerc
 
 `api_endpoint` marks the page as an API reference: an HTTP method optionally followed by a path (max 200 chars). The method shows as a badge next to the page in the site navigation.
 
+`contentType` sets the page's type per file (`docs`, `blog`, `standalone`, or `homepage`), exactly as the pages API takes it; files without one use the workflow's `content-type` input. A `homepage` file publishes at `/` (its slug is fixed to `index`, as in the dashboard), must live at the content root, and a run can carry only one. Note that `prune` only reconciles pages of the input content type, so pages set to a different type per file are never pruned.
+
 `author` credits the page to an author, as an author ID from `GET /api/v1/public/authors` — not a name, since author names are not unique. An empty string removes the author. `og_image_url` sets the social preview image, and `language` sets the page's language tag (`en`, `pt-BR`).
 
 Per-page theme overrides pass through in snake_case: `theme`, `primary_color`, `font_size`, `code_theme_light`, and `code_theme_dark` as strings (empty string resets to inherit from the site), and the boolean overrides (`show_toc`, `show_social_share`, `show_comments`, `show_next_prev`, `show_newsletter_cta`, `show_tags`, `show_dates`, `show_author`, `show_reading_time`, `show_breadcrumbs`, `show_copy_markdown`, `show_gallery_download`, `full_width_gallery`, `masonry_gallery`) as `true`, `false`, or `"inherit"`.
