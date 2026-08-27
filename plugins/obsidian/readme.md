@@ -60,6 +60,12 @@ publishedAt: 2025-01-15
 | `draft` | `true` or `false`. |
 | `tags` | Array of tags (max 20, each max 30 chars). |
 | `publishedAt` | ISO date or datetime. Also reads `date`. |
+| `author` | Author to credit the page to, as an author ID from `GET /api/v1/public/authors` — not a name, since author names are not unique. An empty string removes the author. |
+| `password` | Password-protects the page (min 8 chars, Pro plan). An empty string removes the protection. Your vault is private, so this is as safe as typing it in the dashboard — but avoid it in a vault synced to a shared repository. |
+| `og_image_url` | Social preview image URL. |
+| `language` | Language tag for the page, like `en` or `pt-BR`. |
+| `theme`, `primary_color`, `font_size`, `code_theme_light`, `code_theme_dark` | Per-page theme overrides. An empty string resets a field to inherit from the site. |
+| `show_toc`, `show_social_share`, `show_comments`, `show_next_prev`, `show_newsletter_cta`, `show_tags`, `show_dates`, `show_author`, `show_reading_time`, `show_breadcrumbs`, `show_copy_markdown`, `show_gallery_download`, `full_width_gallery`, `masonry_gallery` | Boolean theme overrides: `true`, `false`, or `"inherit"`. |
 
 After publishing, the plugin writes two tracking fields:
 
