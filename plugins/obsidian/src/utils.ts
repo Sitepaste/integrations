@@ -76,6 +76,120 @@ export interface ValidationError {
   message: string;
 }
 
+// Optional front matter fields passed through to the API (front matter key ->
+// API payload field). `author` takes an author ID from the API's GET /authors
+// endpoint; pages reference authors by ID because names are not unique.
+// Unlike the GitHub Action, `password` IS supported here: a private vault is
+// as reasonable a place to type it as the dashboard's password field, whereas
+// a repository commits it into shared history.
+const PASSTHROUGH_STRING_FIELDS: Record<string, string> = {
+  author: 'authorId',
+  password: 'password',
+  og_image_url: 'ogImageUrl',
+  language: 'language',
+  theme: 'theme',
+  primary_color: 'primaryColor',
+  font_size: 'fontSize',
+  code_theme_light: 'codeThemeLight',
+  code_theme_dark: 'codeThemeDark',
+};
+
+// Per-page boolean theme overrides. Tri-state on the API ("true", "false",
+// "inherit") so an explicit off stays distinct from inherit-from-site; front
+// matter accepts booleans or the string "inherit".
+const TRISTATE_FIELDS: Record<string, string> = {
+  show_toc: 'showToc',
+  show_social_share: 'showSocialShare',
+  show_comments: 'showComments',
+  show_next_prev: 'showNextPrev',
+  show_newsletter_cta: 'showNewsletterCta',
+  show_tags: 'showTags',
+  show_dates: 'showDates',
+  show_author: 'showAuthor',
+  show_reading_time: 'showReadingTime',
+  show_breadcrumbs: 'showBreadcrumbs',
+  show_copy_markdown: 'showCopyMarkdown',
+  show_gallery_download: 'showGalleryDownload',
+  full_width_gallery: 'fullWidthGallery',
+  masonry_gallery: 'masonryGallery',
+};
+
+const VALID_FONT_SIZES = new Set(['compact', 'comfortable', 'large']);
+// Mirrors the API's language validation: a 2-3 letter primary subtag plus
+// optional 1-8 char alphanumeric subtags (singletons and private use
+// included), at most 35 characters.
+const LANGUAGE_RE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/;
+const MAX_LANGUAGE_LENGTH = 35;
+
+/** Optional page fields keyed by API payload field name. */
+export type PageOverrides = Record<string, string>;
+
+/**
+ * Extract the optional passthrough fields (author, password, OG image,
+ * language, theme overrides) from front matter, validating each. Absent keys
+ * stay absent so the server keeps existing values; an empty string clears.
+ */
+export function extractOverrides(fm: Record<string, unknown>): {
+  overrides: PageOverrides;
+  errors: ValidationError[];
+} {
+  const overrides: PageOverrides = {};
+  const errors: ValidationError[] = [];
+
+  for (const [key, apiField] of Object.entries(PASSTHROUGH_STRING_FIELDS)) {
+    const raw = fm[key];
+    if (raw === undefined || raw === null) continue;
+    const value = String(raw).trim();
+    if (key === 'author' && value && (value.includes(' ') || value.length > 40)) {
+      errors.push({
+        field: 'author',
+        message:
+          'author must be an author ID, not a name (author names are not unique); list IDs with GET /api/v1/public/authors',
+      });
+    } else if (key === 'password' && value && value.length < 8) {
+      errors.push({
+        field: 'password',
+        message: 'password must be at least 8 characters (an empty string removes the protection)',
+      });
+    } else if (key === 'og_image_url' && value && !/^(https?:\/\/|\/media)/.test(value)) {
+      errors.push({
+        field: 'og_image_url',
+        message: 'og_image_url must be an http(s) URL or a /media path',
+      });
+    } else if (
+      key === 'language' &&
+      value &&
+      (value.length > MAX_LANGUAGE_LENGTH || !LANGUAGE_RE.test(value))
+    ) {
+      errors.push({
+        field: 'language',
+        message: 'language must be a language tag like "en" or "pt-BR"',
+      });
+    } else if (key === 'font_size' && value && !VALID_FONT_SIZES.has(value)) {
+      errors.push({
+        field: 'font_size',
+        message: 'font_size must be one of: compact, comfortable, large',
+      });
+    } else {
+      overrides[apiField] = value;
+    }
+  }
+
+  for (const [key, apiField] of Object.entries(TRISTATE_FIELDS)) {
+    const raw = fm[key];
+    if (raw === undefined || raw === null) continue;
+    if (raw === true || raw === false) {
+      overrides[apiField] = raw ? 'true' : 'false';
+    } else if (typeof raw === 'string' && ['true', 'false', 'inherit'].includes(raw.trim())) {
+      overrides[apiField] = raw.trim();
+    } else {
+      errors.push({ field: key, message: `${key} must be true, false, or "inherit"` });
+    }
+  }
+
+  return { overrides, errors };
+}
+
 const encoder = new TextEncoder();
 
 export function byteLen(s: string): number {

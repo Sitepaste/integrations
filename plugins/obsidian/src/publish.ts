@@ -2,11 +2,13 @@ import { App, TFile, TFolder } from 'obsidian';
 import type { PagePayload, PublishResponse } from './api';
 import {
   byteLen,
+  extractOverrides,
   normalizeSection,
   slugify,
   titleize,
   validatePage,
   VALID_CONTENT_TYPES,
+  type PageOverrides,
   type ValidationError,
 } from './utils';
 import type { SitepasteSettings } from './settings';
@@ -24,6 +26,7 @@ export interface FilePublishInfo {
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
+  overrides: PageOverrides;
   isUpdate: boolean;
   errors: ValidationError[];
 }
@@ -109,6 +112,8 @@ export async function prepareFile(
 
   const isUpdate = !!fm['sitepaste-slug'];
 
+  const { overrides, errors: overrideErrors } = extractOverrides(fm);
+
   const errors = validatePage({
     slug,
     title,
@@ -126,6 +131,7 @@ export async function prepareFile(
       message: `"${fmContentType}" is not a valid content type`,
     });
   }
+  errors.push(...overrideErrors);
 
   return {
     file,
@@ -139,6 +145,7 @@ export async function prepareFile(
     draft,
     tags,
     publishedAt,
+    overrides,
     isUpdate,
     errors,
   };
@@ -158,10 +165,12 @@ export async function doPublish(
     };
     if (info.section) page.section = info.section;
     if (info.description !== undefined) page.description = info.description;
-    if (info.apiEndpoint !== undefined && info.apiEndpoint !== '') page.apiEndpoint = info.apiEndpoint;
+    if (info.apiEndpoint !== undefined && info.apiEndpoint !== '')
+      page.apiEndpoint = info.apiEndpoint;
     if (info.draft !== undefined) page.draft = info.draft;
     if (info.tags) page.tags = info.tags;
     if (info.publishedAt) page.publishedAt = info.publishedAt;
+    Object.assign(page, info.overrides);
     return page;
   });
 

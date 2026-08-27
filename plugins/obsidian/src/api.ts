@@ -14,6 +14,32 @@ export interface PagePayload {
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
+  // Optional passthrough fields (author, password, OG image, language, and
+  // per-page theme overrides), keyed by API field name — see extractOverrides
+  // in utils.ts. Boolean overrides are the API's tri-state strings.
+  authorId?: string;
+  password?: string;
+  ogImageUrl?: string;
+  language?: string;
+  theme?: string;
+  primaryColor?: string;
+  fontSize?: string;
+  codeThemeLight?: string;
+  codeThemeDark?: string;
+  showToc?: string;
+  showSocialShare?: string;
+  showComments?: string;
+  showNextPrev?: string;
+  showNewsletterCta?: string;
+  showTags?: string;
+  showDates?: string;
+  showAuthor?: string;
+  showReadingTime?: string;
+  showBreadcrumbs?: string;
+  showCopyMarkdown?: string;
+  showGalleryDownload?: string;
+  fullWidthGallery?: string;
+  masonryGallery?: string;
 }
 
 export interface PublishRequest {

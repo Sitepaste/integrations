@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -13,6 +14,48 @@ MAX_SLUG_LENGTH = 100
 MAX_TAGS_COUNT = 20
 API_ENDPOINT_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 MAX_TAG_LENGTH = 30
+
+# Optional front matter fields passed through to the API (front matter key ->
+# API payload field). `author` is an author ID from GET /api/v1/public/authors;
+# pages reference authors by ID because author names are not unique. An empty
+# string clears the field on an existing page.
+PASSTHROUGH_STRING_FIELDS = {
+    "author": "authorId",
+    "og_image_url": "ogImageUrl",
+    "language": "language",
+    "theme": "theme",
+    "primary_color": "primaryColor",
+    "font_size": "fontSize",
+    "code_theme_light": "codeThemeLight",
+    "code_theme_dark": "codeThemeDark",
+}
+
+# Per-page boolean theme overrides. Tri-state on the API ("true", "false",
+# "inherit") so an explicit off stays distinct from inherit-from-site; front
+# matter accepts YAML booleans or the string "inherit".
+TRISTATE_FIELDS = {
+    "show_toc": "showToc",
+    "show_social_share": "showSocialShare",
+    "show_comments": "showComments",
+    "show_next_prev": "showNextPrev",
+    "show_newsletter_cta": "showNewsletterCta",
+    "show_tags": "showTags",
+    "show_dates": "showDates",
+    "show_author": "showAuthor",
+    "show_reading_time": "showReadingTime",
+    "show_breadcrumbs": "showBreadcrumbs",
+    "show_copy_markdown": "showCopyMarkdown",
+    "show_gallery_download": "showGalleryDownload",
+    "full_width_gallery": "fullWidthGallery",
+    "masonry_gallery": "masonryGallery",
+}
+
+VALID_FONT_SIZES = {"compact", "comfortable", "large"}
+# Mirrors the API's language validation: a 2-3 letter primary subtag plus
+# optional 1-8 char alphanumeric subtags (singletons and private use
+# included), at most 35 characters.
+LANGUAGE_RE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
+MAX_LANGUAGE_LENGTH = 35
 
 
 def get_input(name):
@@ -207,7 +250,8 @@ def fetch_remote_pages(token, content_type, site_id):
             data = json.loads(e.read())
         except Exception:
             data = {}
-        die(f"could not list remote pages for prune, api returned {e.code}: {data.get('error', 'unknown error')}")
+        detail = data.get("error", "unknown error")
+        die(f"could not list remote pages for prune, api returned {e.code}: {detail}")
     except urllib.error.URLError as e:
         die(f"could not list remote pages for prune: {e.reason}")
     except TimeoutError:
@@ -405,6 +449,63 @@ def main():
                 valid = False
             else:
                 page["publishedAt"] = published_at
+
+        # A page password is deliberately NOT supported here: front matter is
+        # committed to the repository, so the password would be readable by
+        # anyone with repo access and kept forever in git history. Ignoring
+        # the field silently would be worse — the page would publish
+        # unprotected while the file says otherwise — so the run fails.
+        if "password" in attrs:
+            error(
+                "password front matter is not supported by the GitHub Action;"
+                " a password committed to a repository is not a secret."
+                " Set page passwords in the dashboard or via the API instead.",
+                rel,
+            )
+            valid = False
+
+        for key, api_field in PASSTHROUGH_STRING_FIELDS.items():
+            if key not in attrs:
+                continue
+            value = str(attrs[key]).strip()
+            if key == "author" and value and (" " in value or len(value) > 40):
+                error(
+                    f'author "{value}" must be an author ID from GET /authors, not a name'
+                    " (author names are not unique)",
+                    rel,
+                )
+                valid = False
+            elif (
+                key == "og_image_url"
+                and value
+                and not value.startswith(("http://", "https://", "/media"))
+            ):
+                error(f'og_image_url "{value}" must be an http(s) URL or a /media path', rel)
+                valid = False
+            elif (
+                key == "language"
+                and value
+                and (len(value) > MAX_LANGUAGE_LENGTH or not LANGUAGE_RE.fullmatch(value))
+            ):
+                error(f'language "{value}" must be a language tag like "en" or "pt-BR"', rel)
+                valid = False
+            elif key == "font_size" and value and value not in VALID_FONT_SIZES:
+                error(f'font_size "{value}" must be one of: compact, comfortable, large', rel)
+                valid = False
+            else:
+                page[api_field] = value
+
+        for key, api_field in TRISTATE_FIELDS.items():
+            if key not in attrs:
+                continue
+            value = attrs[key]
+            if value is True or value is False:
+                page[api_field] = "true" if value else "false"
+            elif str(value).strip() in ("true", "false", "inherit"):
+                page[api_field] = str(value).strip()
+            else:
+                error(f'{key} "{value}" must be true, false, or "inherit"', rel)
+                valid = False
 
         entries.append((rel, page))
 

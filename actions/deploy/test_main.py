@@ -570,9 +570,7 @@ class TestMain(unittest.TestCase):
 
     def test_rejects_api_endpoint_without_http_method(self):
         with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "post.md").write_text(
-                "---\ntitle: X\napi_endpoint: FETCH /pages\n---\nbody"
-            )
+            (Path(d) / "post.md").write_text("---\ntitle: X\napi_endpoint: FETCH /pages\n---\nbody")
             with patch.dict(os.environ, self._env(content_dir=d), clear=True):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
@@ -856,7 +854,9 @@ class TestPrune(unittest.TestCase):
             with (
                 patch.dict(
                     os.environ,
-                    self._env(content_dir=d, content_type="standalone", site_id="site-123", prune="true"),
+                    self._env(
+                        content_dir=d, content_type="standalone", site_id="site-123", prune="true"
+                    ),
                     clear=True,
                 ),
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api([], calls)),
@@ -882,6 +882,96 @@ class TestPrune(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     main()
                 self.assertEqual(ctx.exception.code, 1)
+
+
+class TestPassthroughFields(unittest.TestCase):
+    _env = staticmethod(TestMain._env)
+    _capture_payload = staticmethod(TestMain._capture_payload)
+
+    def _publish_one(self, front_matter):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text(f"---\ntitle: T\n{front_matter}\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            return captured["payload"]["pages"][0]
+
+    def _fails_validation(self, front_matter):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text(f"---\ntitle: T\n{front_matter}\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
+    def test_author_id_passes_through_as_author_id(self):
+        page = self._publish_one("author: a7XkQw3mZlPwR9tGhY3nB")
+        self.assertEqual(page["authorId"], "a7XkQw3mZlPwR9tGhY3nB")
+
+    def test_author_name_fails_validation(self):
+        self._fails_validation("author: Ada Lovelace")
+
+    def test_empty_author_clears(self):
+        page = self._publish_one('author: ""')
+        self.assertEqual(page["authorId"], "")
+
+    def test_password_front_matter_fails_the_run(self):
+        self._fails_validation("password: supersecret123")
+
+    def test_og_image_url_passes_through(self):
+        page = self._publish_one("og_image_url: https://example.com/og.png")
+        self.assertEqual(page["ogImageUrl"], "https://example.com/og.png")
+
+    def test_og_image_url_rejects_other_schemes(self):
+        self._fails_validation("og_image_url: ftp://example.com/og.png")
+
+    def test_language_passes_through(self):
+        page = self._publish_one("language: pt-BR")
+        self.assertEqual(page["language"], "pt-BR")
+
+    def test_invalid_language_fails_validation(self):
+        self._fails_validation("language: not a language")
+
+    def test_language_singleton_subtags_pass_through(self):
+        # 1-char singleton/private-use subtags are valid BCP-47 and the API
+        # accepts them.
+        page = self._publish_one("language: de-DE-u-co-phonebk")
+        self.assertEqual(page["language"], "de-DE-u-co-phonebk")
+
+    def test_overlong_language_fails_validation(self):
+        # Well-formed subtags, but past the 35-character cap.
+        self._fails_validation("language: en-abcdefgh-abcdefgh-abcdefgh-abcdefgh")
+
+    def test_theme_override_fields_pass_through(self):
+        page = self._publish_one(
+            "theme: minimal\nprimary_color: '#336699'\nfont_size: compact\n"
+            "code_theme_light: github\ncode_theme_dark: dracula"
+        )
+        self.assertEqual(page["theme"], "minimal")
+        self.assertEqual(page["primaryColor"], "#336699")
+        self.assertEqual(page["fontSize"], "compact")
+        self.assertEqual(page["codeThemeLight"], "github")
+        self.assertEqual(page["codeThemeDark"], "dracula")
+
+    def test_invalid_font_size_fails_validation(self):
+        self._fails_validation("font_size: enormous")
+
+    def test_tristate_booleans_become_tristate_strings(self):
+        page = self._publish_one("show_toc: false\nshow_comments: true\nshow_tags: inherit")
+        self.assertEqual(page["showToc"], "false")
+        self.assertEqual(page["showComments"], "true")
+        self.assertEqual(page["showTags"], "inherit")
+
+    def test_invalid_tristate_fails_validation(self):
+        self._fails_validation("show_toc: sometimes")
+
+    def test_absent_fields_stay_absent_from_payload(self):
+        page = self._publish_one("draft: true")
+        for field in ("authorId", "ogImageUrl", "language", "theme", "showToc"):
+            self.assertNotIn(field, page)
 
 
 if __name__ == "__main__":
