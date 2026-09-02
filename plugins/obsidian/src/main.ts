@@ -12,7 +12,13 @@ import { DryRunModal } from './modals/dry-run';
 import { ConfirmModal } from './modals/confirm';
 import { ProgressModal } from './modals/progress';
 import { ApiError, type PublishResponse } from './api';
-import { pagePath } from './utils';
+import {
+  apiErrorMessage,
+  envelopeFieldErrors,
+  errorDetail,
+  pageFieldErrors,
+  pagePath,
+} from './utils';
 
 export default class SitepastePlugin extends Plugin {
   settings: SitepasteSettings = { ...DEFAULT_SETTINGS };
@@ -138,7 +144,7 @@ export default class SitepastePlugin extends Plugin {
       if (result.build?.deployUrl) {
         msg += `\nDeployed to ${result.build.deployUrl}`;
       } else if (result.build?.error) {
-        msg += `\nBuild skipped: ${result.build.message || result.build.error}`;
+        msg += `\nBuild skipped: ${errorDetail(result.build)}`;
       }
       new Notice(msg, frontmatterFailed ? 8000 : 5000);
     } catch (err) {
@@ -258,17 +264,19 @@ export default class SitepastePlugin extends Plugin {
             failedIndices.add(globalIdx + i);
           }
           if (err instanceof ApiError) {
-            modal.log(`Batch ${b + 1} error (${err.status}): ${err.message}`);
-            const rawPages = err.body['pages'];
-            if (err.status === 400 && rawPages && typeof rawPages === 'object') {
-              const pageErrors = rawPages as Record<string, Record<string, string>>;
-              for (const [idx, fields] of Object.entries(pageErrors)) {
-                const pi = parseInt(idx, 10);
-                const name = pi < batch.length ? batch[pi].file.basename : `page ${idx}`;
-                for (const [field, msg] of Object.entries(fields)) {
-                  modal.log(`  ${name}: ${field} - ${msg}`);
-                }
-              }
+            modal.log(
+              `Batch ${b + 1} error (${err.status}): ${apiErrorMessage(err.status, err.body)}`,
+            );
+            // Only a validation response carries these, so no status check is
+            // needed: every other body yields an empty list.
+            for (const fieldError of pageFieldErrors(err.body)) {
+              const inBatch = fieldError.index >= 0 && fieldError.index < batch.length;
+              const name = inBatch ? batch[fieldError.index].file.basename : 'unknown page';
+              modal.log(`  ${name}: ${fieldError.field} - ${fieldError.message}`);
+            }
+            // A problem with the batch itself belongs to no one file.
+            for (const fieldError of envelopeFieldErrors(err.body)) {
+              modal.log(`  ${fieldError.field} - ${fieldError.message}`);
             }
           } else {
             modal.log(`Batch ${b + 1} error: ${err instanceof Error ? err.message : String(err)}`);
@@ -304,8 +312,9 @@ export default class SitepastePlugin extends Plugin {
       if (lastResult?.build?.deployUrl) {
         summary += ` Deployed to ${lastResult.build.deployUrl}`;
       } else if (lastResult?.build?.error) {
-        summary += ` Build skipped: ${lastResult.build.message || lastResult.build.error}`;
-        modal.log(`Build: ${lastResult.build.message || lastResult.build.error}`);
+        const why = errorDetail(lastResult.build);
+        summary += ` Build skipped: ${why}`;
+        modal.log(`Build: ${why}`);
       } else if (failedIndices.size > 0 && this.settings.triggerBuild) {
         summary += ' Build skipped due to failures.';
       }
@@ -331,41 +340,15 @@ export default class SitepastePlugin extends Plugin {
       new Notice(`Publish failed: ${err instanceof Error ? err.message : String(err)}`, 8000);
       return;
     }
-    switch (err.status) {
-      case 401:
-        new Notice('Invalid API key. Check your key in Settings > Sitepaste.', 8000);
-        break;
-      case 403:
-        new Notice('API access requires a Pro plan. Upgrade at sitepaste.com.', 8000);
-        break;
-      case 402:
-        new Notice(
-          `Quota exceeded: ${err.message}. Check your plan limits at sitepaste.com.`,
-          8000,
-        );
-        break;
-      case 413:
-        new Notice(
-          'Request too large. Try publishing a smaller folder or fewer files at once.',
-          8000,
-        );
-        break;
-      case 429:
-        new Notice('Rate limited. Wait a moment and try again.', 8000);
-        break;
-      default: {
-        let msg = `Publish failed (${err.status}): ${err.message}`;
-        const rawPages = err.body['pages'];
-        if (err.status === 400 && rawPages && typeof rawPages === 'object') {
-          const pageErrors = rawPages as Record<string, Record<string, string>>;
-          for (const [, fields] of Object.entries(pageErrors)) {
-            for (const [field, fieldMsg] of Object.entries(fields)) {
-              msg += `\n${field}: ${fieldMsg}`;
-            }
-          }
-        }
-        new Notice(msg, 8000);
-      }
+    // A single-file publish has one page, so the field errors are listed
+    // without naming it; the folder path names each file from its batch.
+    const lines = [apiErrorMessage(err.status, err.body)];
+    for (const fieldError of pageFieldErrors(err.body)) {
+      lines.push(`${fieldError.field}: ${fieldError.message}`);
     }
+    for (const fieldError of envelopeFieldErrors(err.body)) {
+      lines.push(`${fieldError.field}: ${fieldError.message}`);
+    }
+    new Notice(lines.join('\n'), 8000);
   }
 }

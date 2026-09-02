@@ -14,7 +14,7 @@ inputs:
     description: 'Content type for all pages: docs, blog, or standalone. Subdirectories become sections: /docs/{section}/{slug} for docs and blog, /{section}/{slug} for standalone.'
   site-id:
     required: false
-    description: 'Target site UUID'
+    description: 'Target site ID, either the short ID shown in the dashboard or the full UUID'
   dry-run:
     required: false
     default: 'false'
@@ -23,6 +23,10 @@ inputs:
     required: false
     default: 'false'
     description: 'Delete pages of this content type that exist on the site but not in the content directory, making the directory the single source of truth. Only pages matching content-type are ever deleted. With dry-run, lists the pages that would be deleted.'
+  fail-on-build-error:
+    required: false
+    default: 'true'
+    description: 'Fail the run when the pages were saved but the deploy was refused (a missing deploy scope, the monthly quota, the deploy cooldown, or the hourly deploy budget). Set to false to report it as a warning instead.'
 outputs:
   page-count:
     description: 'Number of pages synced'
@@ -43,3 +47,4 @@ runs:
         INPUT_SITE_ID: ${{ inputs.site-id }}
         INPUT_DRY_RUN: ${{ inputs.dry-run }}
         INPUT_PRUNE: ${{ inputs.prune }}
+        INPUT_FAIL_ON_BUILD_ERROR: ${{ inputs.fail-on-build-error }}

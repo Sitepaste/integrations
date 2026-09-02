@@ -32,7 +32,9 @@ export class SitepasteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('API key')
-      .setDesc('Your Sitepaste API key. Found in Dashboard > Tokens.')
+      .setDesc(
+        'Your Sitepaste API key, created in the dashboard under Account > Tokens. Needs the content scope, plus deploy if you want it to trigger builds.',
+      )
       .addText((text) => {
         text.inputEl.type = 'password';
         text
@@ -46,10 +48,12 @@ export class SitepasteSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Site ID')
-      .setDesc('Optional. Leave empty to use your default site.')
+      .setDesc(
+        'Optional. The short ID shown in the dashboard, or the full UUID. Leave empty to use your default site.',
+      )
       .addText((text) =>
         text
-          .setPlaceholder('abcd1234-5678-...')
+          .setPlaceholder('i26zu2vzmc7m')
           .setValue(this.plugin.settings.siteId)
           .onChange((value) => {
             this.plugin.settings.siteId = value.trim();

@@ -4,6 +4,8 @@ A GitHub Action that syncs markdown files to [Sitepaste](https://sitepaste.com) 
 
 Requires a Pro plan, as API tokens can only be created and used on the Pro plan.
 
+The token needs the `content` and `deploy` scopes. `content` writes the pages and `deploy` publishes them. Scopes are chosen when the token is created in the dashboard under Account > Tokens, and cannot be changed afterwards. The deploy travels in the same `POST /sites/{siteId}/pages` request that writes the pages, but it is the same deploy `POST /sites/{siteId}/deployments` queues, and it requires that route's scope. A token holding `content` alone still syncs every page, and the deploy then comes back refused, which `fail-on-build-error` turns into a failed run.
+
 ## Quick start
 
 ```yaml
@@ -17,12 +19,13 @@ Requires a Pro plan, as API tokens can only be created and used on the Pro plan.
 
 | Input          | Required | Default   | Description                                                   |
 | -------------- | -------- | --------- | ------------------------------------------------------------- |
-| `api-token`    | Yes      |           | Sitepaste API token (`sp_...`). Store as a repository secret. |
+| `api-token`    | Yes      |           | Sitepaste API token (`sp_...`) with the `content` and `deploy` scopes. Store as a repository secret. |
 | `content-dir`  | No       | `content` | Path to the directory containing markdown files.              |
 | `content-type` | No       | `docs`    | Content type for all pages: `docs`, `blog`, or `standalone`.  |
-| `site-id`      | No       |           | Target site UUID. Omit to use the default site.               |
+| `site-id`      | No       |           | Target site ID, either the short ID shown in the dashboard or the full UUID. Omit to use the default site. |
 | `dry-run`      | No       | `false`   | Validate and preview without syncing or building.             |
 | `prune`        | No       | `false`   | Delete pages of this content type that are not in the content directory. See [Pruning](#pruning). |
+| `fail-on-build-error` | No | `true`  | Fail the run when the pages were saved but the deploy was refused. See [Deploys](#deploys). |
 
 ## Sections
 
@@ -76,7 +79,7 @@ description: A guide to getting started
 tags: [guides, setup]
 draft: false
 publishedAt: 2026-02-17
-api_endpoint: GET /pages/{slug}
+api_endpoint: GET /sites/{siteId}/pages/{slug}
 ---
 
 Your content here...
@@ -90,7 +93,9 @@ All fields are optional. `slug` is derived from the filename when absent (lowerc
 
 `contentType` sets the page's type per file (`docs`, `blog`, `standalone`, or `homepage`), exactly as the pages API takes it; files without one use the workflow's `content-type` input. A `homepage` file publishes at `/` (its slug is fixed to `index`, as in the dashboard), must live at the content root, and a run can carry only one. Note that `prune` only reconciles pages of the input content type, so pages set to a different type per file are never pruned.
 
-`author` credits the page to an author, as an author ID from `GET /api/v1/public/authors` — not a name, since author names are not unique. An empty string removes the author. `og_image_url` sets the social preview image, and `language` sets the page's language tag (`en`, `pt-BR`).
+`show_listings` is the homepage's own setting — whether recent posts and section listings show below the content — and takes `true` or `false`. It means nothing on any other page, so the action warns and drops it rather than writing a setting the page cannot use.
+
+`author` credits the page to an author, as an author ID from `GET /api/v1/public/sites/{siteId}/authors` — not a name, since author names are not unique. An empty string removes the author. `og_image_url` sets the social preview image, and `language` sets the page's language tag (`en`, `pt-BR`).
 
 Per-page theme overrides pass through in snake_case: `theme`, `primary_color`, `font_size`, `code_theme_light`, and `code_theme_dark` as strings (empty string resets to inherit from the site), and the boolean overrides (`show_toc`, `show_social_share`, `show_comments`, `show_next_prev`, `show_newsletter_cta`, `show_tags`, `show_dates`, `show_author`, `show_reading_time`, `show_breadcrumbs`, `show_copy_markdown`, `show_gallery_download`, `full_width_gallery`, `masonry_gallery`) as `true`, `false`, or `"inherit"`.
 
@@ -105,10 +110,9 @@ Tag casing is kept as the display name, the same way section directory casing is
 | `docs`       | Documentation, guides, reference pages |
 | `blog`       | Blog posts, articles                   |
 | `standalone` | Landing pages, about pages, custom top-level sections (`/handbook/...`) |
+| `homepage`   | The site's `/` page. Per file only, via front matter |
 
-Every file in the batch uses the same content type.
-
-> The `homepage` content type exists but is not supported by this action. A site can only have one homepage, so it must be published individually through the dashboard or the Obsidian plugin's single-file publish.
+The `content-type` input sets the type for every file in the run; a file that carries its own `contentType` in front matter overrides it. `homepage` is available only that way, since a site has exactly one and the input applies to the whole directory.
 
 ## How it works
 
@@ -116,8 +120,16 @@ Every file in the batch uses the same content type.
 2. Derives sections from subdirectory names (overridable via front matter).
 3. Parses front matter and derives missing slugs and titles from filenames.
 4. Validates content limits and checks for duplicate slugs within each section.
-5. Sends a single `POST /api/v1/public/pages` request with all pages and `build: true`.
+5. Sends a single `POST /api/v1/public/sites/{siteId}/pages` request with all pages and `build: true`.
 6. Reports results via GitHub Actions annotations.
+
+## Deploys
+
+The pages and the deploy travel in one request, so a run either writes every page or writes none, and the deploy is queued once the writes have landed.
+
+The deploy can still be refused once the pages are saved. A token without the `deploy` scope, the monthly deploy quota, the 30-second cooldown between deploys, and an hourly budget of 300 deploys shared by every token in the workspace each do so on their own. In practice the cooldown is the one a busy repository meets, since it caps a site at 120 deploys an hour on its own. When that happens the pages are saved but the site keeps serving the previous build, so the run fails by default with the API's reason. Set `fail-on-build-error: 'false'` to report it as a warning and pass instead, which suits a workflow that deploys on a schedule rather than on every push.
+
+`page-count` is set either way; `deploy-url` only when a deploy was actually queued.
 
 Pages are created or updated by slug. By default, existing pages not in the batch are left untouched (additive only); set `prune: 'true'` to delete them instead.
 

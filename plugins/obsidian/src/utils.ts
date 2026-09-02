@@ -77,8 +77,9 @@ export interface ValidationError {
 }
 
 // Optional front matter fields passed through to the API (front matter key ->
-// API payload field). `author` takes an author ID from the API's GET /authors
-// endpoint; pages reference authors by ID because names are not unique.
+// API payload field). `author` takes an author ID from the API's
+// GET /sites/{siteId}/authors; pages reference authors by ID because names
+// are not unique.
 // Unlike the GitHub Action, `password` IS supported here: a private vault is
 // as reasonable a place to type it as the dashboard's password field, whereas
 // a repository commits it into shared history.
@@ -144,7 +145,7 @@ export function extractOverrides(fm: Record<string, unknown>): {
       errors.push({
         field: 'author',
         message:
-          'author must be an author ID, not a name (author names are not unique); list IDs with GET /api/v1/public/authors',
+          'author must be an author ID, not a name (author names are not unique); list IDs with GET /api/v1/public/sites/{siteId}/authors',
       });
     } else if (key === 'password' && value && value.length < 8) {
       errors.push({
@@ -188,6 +189,29 @@ export function extractOverrides(fm: Record<string, unknown>): {
   }
 
   return { overrides, errors };
+}
+
+/**
+ * Read the homepage's showListings setting from front matter.
+ *
+ * It is the homepage's own setting — whether recent posts and section
+ * listings show below the content — and means nothing on any other page, so
+ * it is read only there. On any other page it is simply not a field this
+ * plugin knows, like every other key a vault carries for some other tool.
+ */
+export function extractShowListings(
+  fm: Record<string, unknown>,
+  contentType: string,
+): { showListings?: boolean; errors: ValidationError[] } {
+  if (contentType !== 'homepage') return { errors: [] };
+  const raw = fm['show_listings'] ?? fm['showListings'];
+  if (raw === undefined || raw === null) return { errors: [] };
+  if (typeof raw !== 'boolean') {
+    return {
+      errors: [{ field: 'show_listings', message: 'show_listings must be true or false' }],
+    };
+  }
+  return { showListings: raw, errors: [] };
 }
 
 const encoder = new TextEncoder();
@@ -357,5 +381,130 @@ export function validatePage(page: {
     }
   }
 
+  return errors;
+}
+
+// --- API error rendering ---
+
+/** One field error from a batch response, tied to its page's index in the request. */
+export interface PageFieldError {
+  index: number;
+  field: string;
+  message: string;
+}
+
+/**
+ * The detail as a finished sentence. The API punctuates some of its own error
+ * sentences and not others ("Storage quota exceeded." beside "metrics require
+ * Pro plan"), so anything that puts words after one has to close it first.
+ */
+function asSentence(detail: string): string {
+  return /[.!?]$/.test(detail) ? detail : `${detail}.`;
+}
+
+/**
+ * Render the API's error triple as one sentence for the user.
+ *
+ * The envelope is `{error, code}`: `error` is the human sentence to show and
+ * `code` is the stable identifier to branch on. The batch's `build` field
+ * carries the same keys, deliberately, so a refused deploy reads the
+ * same whether it came back nested in a 200 or as the whole response — which
+ * is why this renders the triple and the caller supplies the context.
+ *
+ * A missing scope gets its own sentence. The API's own wording names the
+ * scope but not the remedy, and the remedy is the part that matters: scopes
+ * are fixed when a token is minted, so the fix is a new token rather than an
+ * edit to this one.
+ */
+export function errorDetail(body: Record<string, unknown>): string {
+  const code = typeof body['code'] === 'string' ? body['code'] : '';
+  const detail = typeof body['error'] === 'string' ? body['error'] : '';
+
+  if (code === 'token_scope_required') {
+    const scope = typeof body['scope'] === 'string' ? body['scope'] : '';
+    const missing = scope ? `the "${scope}" scope` : 'a scope this request needs';
+    return `This token is missing ${missing}. Token scopes are fixed at creation, so create a new token that has it under Account > Tokens.`;
+  }
+  if (code === 'payment_past_due') {
+    return 'Your Sitepaste subscription is past due. Publishing resumes once billing is up to date.';
+  }
+  return detail;
+}
+
+/**
+ * The user-facing headline for an API error response. It lives here rather
+ * than in main.ts so it can be unit-tested without Obsidian.
+ *
+ * 403 is deliberately not one message. The API answers it for a token that is
+ * missing the route's scope, a past-due subscription, a page setting that is
+ * reserved, and a workspace that is not on Pro. Telling a Pro user with a
+ * media-only token to upgrade their plan hides the real cause and the remedy,
+ * so the machine code decides, not the status alone.
+ */
+export function apiErrorMessage(status: number, body: Record<string, unknown>): string {
+  const code = typeof body['code'] === 'string' ? body['code'] : '';
+  const detail = errorDetail(body);
+
+  // The codes errorDetail answers with a remedy of their own outrank the
+  // status: which of the several things a 403 means is exactly what the
+  // status cannot say.
+  if (code === 'token_scope_required' || code === 'payment_past_due') return detail;
+
+  switch (status) {
+    case 401:
+      return 'Invalid API key. Check your key in Settings > Sitepaste.';
+    case 402:
+      return detail
+        ? `Quota exceeded: ${asSentence(detail)} Check your plan limits at sitepaste.com.`
+        : 'Quota exceeded. Check your plan limits at sitepaste.com.';
+    case 403:
+      // A refused page setting (a reserved theme, say) says what was refused,
+      // and naming it beats a blanket "upgrade".
+      return detail
+        ? asSentence(detail)
+        : 'API access requires a Pro plan. Upgrade at sitepaste.com.';
+    case 413:
+      return 'Request too large. Try publishing a smaller folder or fewer files at once.';
+    case 429:
+      return 'Rate limited. Wait a moment and try again.';
+    default:
+      return `Publish failed (${status}): ${detail || code || 'unknown error'}`;
+  }
+}
+
+/**
+ * The envelope's own field problems, which a 422 reports in `fields` rather
+ * than keyed by entry index: a problem with the batch itself has one place to
+ * point at. Empty for every other response shape, so callers need no status
+ * check here either.
+ */
+export function envelopeFieldErrors(body: Record<string, unknown>): ValidationError[] {
+  const raw = body['fields'];
+  if (typeof raw !== 'object' || raw === null) return [];
+  return Object.entries(raw as Record<string, unknown>).map(([field, message]) => ({
+    field,
+    message: String(message),
+  }));
+}
+
+/**
+ * The per-page field errors a 422 batch response carries, flattened and kept
+ * with the page's index in the request so a caller holding the batch can name
+ * the file. Empty for every other response shape, which is what lets callers
+ * skip a status check. An index that is not a number comes back as -1.
+ */
+export function pageFieldErrors(body: Record<string, unknown>): PageFieldError[] {
+  const raw = body['pages'];
+  if (typeof raw !== 'object' || raw === null) return [];
+
+  const errors: PageFieldError[] = [];
+  for (const [key, fields] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof fields !== 'object' || fields === null) continue;
+    const parsed = Number.parseInt(key, 10);
+    const index = Number.isInteger(parsed) ? parsed : -1;
+    for (const [field, message] of Object.entries(fields as Record<string, unknown>)) {
+      errors.push({ index, field, message: String(message) });
+    }
+  }
   return errors;
 }

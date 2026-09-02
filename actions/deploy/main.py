@@ -8,15 +8,25 @@ from datetime import datetime
 from pathlib import Path
 from typing import NoReturn
 
-API = "https://sitepaste.com/api/v1/public/pages"
+API_BASE = "https://sitepaste.com/api/v1/public"
+
+
+def pages_url(site_id):
+    """The site's pages collection. The site is part of the URI, and "default"
+    names the workspace's default one."""
+    return f"{API_BASE}/sites/{site_id or 'default'}/pages"
+
+
 TYPES = {"docs", "blog", "standalone"}
+# The largest window GET /sites/{siteId}/pages serves in one call.
+LIST_PAGE_SIZE = 1000
 MAX_SLUG_LENGTH = 100
 MAX_TAGS_COUNT = 20
 API_ENDPOINT_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 MAX_TAG_LENGTH = 30
 
 # Optional front matter fields passed through to the API (front matter key ->
-# API payload field). `author` is an author ID from GET /api/v1/public/authors;
+# API payload field). `author` is an author ID from GET /sites/{siteId}/authors;
 # pages reference authors by ID because author names are not unique. An empty
 # string clears the field on an existing page.
 PASSTHROUGH_STRING_FIELDS = {
@@ -87,6 +97,38 @@ def warn(msg, file=None):
 def die(msg, file=None) -> NoReturn:
     error(msg, file)
     sys.exit(1)
+
+
+def error_detail(data):
+    """Render the API's error triple as one human sentence.
+
+    The envelope is {"error": <sentence>, "code": <stable id>}: `error` is
+    what to show and `code` is what to branch on. The batch's `build` field
+    carries the same keys, deliberately, so a refused deploy reads the
+    same whether it came back nested in a 200 or as the whole response —
+    which is why this renders the triple and the caller supplies the context.
+
+    A missing scope gets its own sentence. The API's own wording names the
+    scope but not the remedy, and the remedy is the part a run log needs:
+    scopes are fixed when a token is minted, so the fix is a new token rather
+    than an edit to this one.
+    """
+    code = data.get("code") or ""
+    detail = data.get("error") or "unknown error"
+    if code == "token_scope_required":
+        scope = data.get("scope")
+        missing = f'the "{scope}" scope' if scope else "a scope this request needs"
+        return (
+            f"this token is missing {missing}. Token scopes are fixed at creation,"
+            " so create a new token that has it in the dashboard under"
+            " Account > Tokens."
+        )
+    return f"{detail} ({code})" if code else detail
+
+
+def api_error_message(status, data):
+    """Render an API error response as one line for a GitHub annotation."""
+    return f"api returned {status}: {error_detail(data)}"
 
 
 def strip_quotes(s):
@@ -231,32 +273,49 @@ def find_relative_images(text):
 
 
 def fetch_remote_pages(token, content_type, site_id):
-    url = f"{API}?contentType={content_type}"
-    if site_id:
-        url += f"&siteId={site_id}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "Sitepaste-Deploy",
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
+    """Every remote page of this content type, following the API's window.
+
+    The list is offset-windowed and serves at most LIST_PAGE_SIZE rows per
+    call, so reading one window would plan the prune against a prefix of the
+    collection: a site with more pages than that would keep the ones past the
+    first window, silently, and the run would still report success. `total`
+    is the size of the whole (already contentType-filtered) collection, so it
+    is what says whether there is more to read.
+    """
+    pages = []
+    while True:
+        url = (
+            f"{pages_url(site_id)}?contentType={content_type}"
+            f"&limit={LIST_PAGE_SIZE}&offset={len(pages)}"
+        )
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "Sitepaste-Deploy",
+            },
+            method="GET",
+        )
         try:
-            data = json.loads(e.read())
-        except Exception:
-            data = {}
-        detail = data.get("error", "unknown error")
-        die(f"could not list remote pages for prune, api returned {e.code}: {detail}")
-    except urllib.error.URLError as e:
-        die(f"could not list remote pages for prune: {e.reason}")
-    except TimeoutError:
-        die("could not list remote pages for prune: request timed out after 120 seconds")
-    return data.get("pages", [])
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            try:
+                data = json.loads(e.read())
+            except Exception:
+                data = {}
+            die(f"could not list remote pages for prune, {api_error_message(e.code, data)}")
+        except urllib.error.URLError as e:
+            die(f"could not list remote pages for prune: {e.reason}")
+        except TimeoutError:
+            die("could not list remote pages for prune: request timed out after 120 seconds")
+
+        window = data.get("pages") or []
+        pages.extend(window)
+        # An empty window ends the loop even when total disagrees, so a
+        # miscount cannot spin here forever.
+        if not window or len(pages) >= data.get("total", len(pages)):
+            return pages
 
 
 def page_url(content_type, section, slug):
@@ -289,6 +348,13 @@ def main():
     site_id = get_input("site-id")
     dry_run = get_input("dry-run") == "true"
     prune = get_input("prune") == "true"
+    # On by default: a refused deploy leaves the pages saved but the site
+    # serving the previous build, which a green run would hide. The API
+    # refuses one for a missing deploy scope, a monthly quota, the 30-second
+    # cooldown, or the hourly budget of 300 deploys that every token in the
+    # workspace shares — in practice the cooldown is the one a busy
+    # repository meets, since it caps a site at 120 deploys an hour on its own.
+    fail_on_build_error = get_input("fail-on-build-error") != "false"
 
     if token:
         print(f"::add-mask::{token}")
@@ -445,6 +511,19 @@ def main():
             page["apiEndpoint"] = api_endpoint
         if "draft" in attrs:
             page["draft"] = attrs["draft"]
+        # showListings is the homepage's own setting — recent posts and
+        # section listings below the content — and means nothing on any other
+        # page. Passing it through regardless would leave it sitting silently
+        # in a blog post's front matter doing nothing, so say so instead.
+        if "show_listings" in attrs:
+            show_listings = attrs["show_listings"]
+            if show_listings is not True and show_listings is not False:
+                error(f'show_listings "{show_listings}" must be true or false', rel)
+                valid = False
+            elif file_content_type != "homepage":
+                warn("show_listings only applies to a homepage; ignoring it here", rel)
+            else:
+                page["showListings"] = show_listings
         if attrs.get("tags"):
             raw_tags = attrs["tags"]
             if not isinstance(raw_tags, list):
@@ -495,7 +574,8 @@ def main():
             value = str(attrs[key]).strip()
             if key == "author" and value and (" " in value or len(value) > 40):
                 error(
-                    f'author "{value}" must be an author ID from GET /authors, not a name'
+                    f'author "{value}" must be an author ID from'
+                    " GET /sites/{siteId}/authors, not a name"
                     " (author names are not unique)",
                     rel,
                 )
@@ -575,12 +655,10 @@ def main():
     payload = {"pages": pages, "build": True}
     if delete_slugs:
         payload["deleteSlugs"] = delete_slugs
-    if site_id:
-        payload["siteId"] = site_id
 
     body_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        API,
+        pages_url(site_id),
         data=body_bytes,
         headers={
             "Authorization": f"Bearer {token}",
@@ -598,14 +676,30 @@ def main():
             data = json.loads(e.read())
         except Exception:
             data = {}
-        if e.code == 400 and "pages" in data:
-            for idx_str, field_errors in data["pages"].items():
-                idx = int(idx_str)
-                file = entries[idx][0] if idx < len(entries) else f"page {idx_str}"
+        # A batch reports an entry's problems keyed by its index in "pages",
+        # because one request can carry problems on many entries; a problem
+        # with the envelope's own fields has one place to point at and comes
+        # back in "fields" like any other write. Both are 422 — the body
+        # parsed and its contents are wrong. Reporting them independently
+        # keeps a body carrying both from having half of it dropped.
+        page_errors = data.get("pages") if e.code == 422 else None
+        field_errors = data.get("fields") if e.code == 422 else None
+        if isinstance(page_errors, dict) or isinstance(field_errors, dict):
+            if isinstance(page_errors, dict):
+                for idx_str, fields in page_errors.items():
+                    if not isinstance(fields, dict):
+                        continue
+                    idx = int(idx_str) if idx_str.isdigit() else -1
+                    file = entries[idx][0] if 0 <= idx < len(entries) else f"page {idx_str}"
+                    for field, msg in fields.items():
+                        error(f"validation failed for {field}: {msg}", file)
+            if isinstance(field_errors, dict):
                 for field, msg in field_errors.items():
-                    error(f"validation failed for {field}: {msg}", file)
+                    error(f"validation failed for {field}: {msg}")
         else:
-            error(f"api returned {e.code}: {data.get('error', 'unknown error')}")
+            # Anything else has no per-file detail to attach, so it prints as
+            # one line.
+            error(api_error_message(e.code, data))
         sys.exit(1)
     except urllib.error.URLError as e:
         die(f"request failed: {e.reason}")
@@ -617,9 +711,14 @@ def main():
     if delete_slugs:
         print(f"Pruned {len(data.get('deleted', []))} page(s).")
 
-    build = data.get("build", {})
+    # The page writes are already committed by the time a deploy is refused,
+    # so the outputs above are set either way and only the deploy is in doubt.
+    build = data.get("build") or {}
     if build.get("error"):
-        warn(f"Build was not triggered: {build.get('message') or build['error']}")
+        msg = f"pages were saved but the deploy was not queued: {error_detail(build)}"
+        if fail_on_build_error:
+            die(f"{msg} (set fail-on-build-error: 'false' to treat this as a warning)")
+        warn(msg)
     elif build.get("deployUrl"):
         set_output("deploy-url", build["deployUrl"])
         print(f"Deployed to {build['deployUrl']}")

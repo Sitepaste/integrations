@@ -3,7 +3,18 @@
 // import-free, which is what keeps it testable outside Obsidian.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractOverrides, normalizeSection, pagePath, slugify, validatePage } from './utils.ts';
+import {
+  apiErrorMessage,
+  envelopeFieldErrors,
+  errorDetail,
+  extractOverrides,
+  extractShowListings,
+  normalizeSection,
+  pageFieldErrors,
+  pagePath,
+  slugify,
+  validatePage,
+} from './utils.ts';
 
 const page = (overrides: Record<string, unknown>) => ({
   slug: 'post-builds',
@@ -149,4 +160,179 @@ test('an invalid tri-state value is rejected', () => {
 test('absent keys stay absent so the server keeps existing values', () => {
   const { overrides } = extractOverrides({ title: 'T', draft: true });
   assert.deepEqual(overrides, {});
+});
+
+// --- showListings: the homepage's own setting ---
+
+test('a homepage carries show_listings through to the payload', () => {
+  const { showListings } = extractShowListings({ show_listings: true }, 'homepage');
+  assert.equal(showListings, true);
+});
+
+test('an explicit off is sent rather than dropped', () => {
+  // Dropping it would leave the homepage on whatever it was last set to.
+  const { showListings } = extractShowListings({ show_listings: false }, 'homepage');
+  assert.equal(showListings, false);
+});
+
+test('show_listings on a blog post is not a field this plugin knows', () => {
+  const { showListings, errors } = extractShowListings({ show_listings: true }, 'blog');
+  assert.equal(showListings, undefined);
+  assert.deepEqual(errors, []);
+});
+
+test('a non-boolean show_listings on a homepage is a validation error', () => {
+  const { errors } = extractShowListings({ show_listings: 'maybe' }, 'homepage');
+  assert.equal(errors[0]?.field, 'show_listings');
+});
+
+// --- API errors ---
+//
+// Every body below is the API's own envelope: `error` is the human sentence
+// and `code` the stable identifier. Reading them the other way round matches
+// no code and drops every tailored message, which is a failure that shows up
+// only in a user's notice — so the shapes here are what pins it.
+
+test('a missing scope names the scope and how to fix it', () => {
+  const msg = apiErrorMessage(403, {
+    error: 'this token does not carry the "content" scope',
+    code: 'token_scope_required',
+    scope: 'content',
+  });
+  assert.match(msg, /"content" scope/);
+  assert.match(msg, /Account > Tokens/);
+});
+
+test('a missing scope does not guess a scope the body did not name', () => {
+  const msg = apiErrorMessage(403, { error: 'scope missing', code: 'token_scope_required' });
+  assert.match(msg, /Account > Tokens/);
+  assert.doesNotMatch(msg, /"content"/);
+});
+
+test('a past-due subscription is not reported as a missing plan', () => {
+  const msg = apiErrorMessage(403, {
+    error: 'your subscription is past due',
+    code: 'payment_past_due',
+  });
+  assert.match(msg, /past due/);
+  assert.doesNotMatch(msg, /Upgrade/);
+});
+
+test('a refused page setting shows what was refused, not a blanket upgrade', () => {
+  const msg = apiErrorMessage(403, {
+    error: "The 'wasy' theme is reserved",
+    code: 'theme_restricted',
+  });
+  assert.equal(msg, "The 'wasy' theme is reserved.");
+});
+
+test('a plan-level 403 without a sentence still asks for Pro', () => {
+  assert.match(apiErrorMessage(403, { code: 'forbidden' }), /Pro plan/);
+});
+
+test('the known statuses keep their own guidance', () => {
+  assert.match(
+    apiErrorMessage(401, { error: 'invalid or revoked token', code: 'unauthorized' }),
+    /Invalid API key/,
+  );
+  assert.match(apiErrorMessage(413, {}), /too large/);
+  assert.match(
+    apiErrorMessage(429, { error: 'rate limit exceeded', code: 'rate_limited' }),
+    /Rate limited/,
+  );
+});
+
+test('an unpunctuated API sentence is closed before more text follows it', () => {
+  // The API punctuates some of its own sentences and not others, so a detail
+  // pasted straight in front of the next one runs the two together.
+  const msg = apiErrorMessage(402, { error: 'metrics require Pro plan', code: 'plan_required' });
+  assert.match(msg, /Pro plan\. Check your plan limits/);
+});
+
+test('a 402 carries the quota detail the API sent', () => {
+  const msg = apiErrorMessage(402, {
+    error: 'Upgrade to Pro to enable password protection.',
+    code: 'plan_required',
+  });
+  assert.match(msg, /Upgrade to Pro to enable password protection/);
+});
+
+test('a 402 without any detail still reads as a sentence', () => {
+  assert.equal(
+    apiErrorMessage(402, {}),
+    'Quota exceeded. Check your plan limits at sitepaste.com.',
+  );
+});
+
+test('an unmapped status falls back to the sentence and status', () => {
+  assert.equal(
+    apiErrorMessage(500, { error: 'failed to save pages', code: 'internal_error' }),
+    'Publish failed (500): failed to save pages',
+  );
+});
+
+test('an empty body still produces a message', () => {
+  assert.equal(apiErrorMessage(502, {}), 'Publish failed (502): unknown error');
+});
+
+// --- errorDetail: the same triple, read out of a batch's build field ---
+
+test('a deploy refused for a missing scope names the deploy scope', () => {
+  const detail = errorDetail({
+    error: 'This token does not carry the "deploy" scope.',
+    code: 'token_scope_required',
+    scope: 'deploy',
+  });
+  assert.match(detail, /"deploy" scope/);
+  assert.match(detail, /Account > Tokens/);
+});
+
+test('a deploy refused by a quota shows the API sentence', () => {
+  assert.equal(
+    errorDetail({
+      error: 'The monthly build limit for your plan has been reached.',
+      code: 'quota_exceeded',
+    }),
+    'The monthly build limit for your plan has been reached.',
+  );
+});
+
+// --- Envelope field errors: the batch's own problems, belonging to no page ---
+
+test('a problem with the batch itself is reported without a page to blame', () => {
+  const errors = envelopeFieldErrors({
+    error: 'validation failed',
+    code: 'validation_failed',
+    fields: { pages: 'pages array exceeds 5000 entries' },
+  });
+  assert.deepEqual(errors, [{ field: 'pages', message: 'pages array exceeds 5000 entries' }]);
+});
+
+test('a body with no envelope fields yields none, so callers need no status check', () => {
+  assert.deepEqual(envelopeFieldErrors({ error: 'not found', code: 'not_found' }), []);
+});
+
+// --- Batch field errors: flattened, and tied back to the page's index ---
+
+test('field errors keep the page index so a caller can name the file', () => {
+  const errors = pageFieldErrors({
+    error: 'validation failed',
+    pages: { '2': { slug: 'invalid slug', title: 'title is required for new pages' } },
+  });
+  assert.equal(errors.length, 2);
+  assert.deepEqual(
+    errors.map((e) => e.index),
+    [2, 2],
+  );
+  assert.deepEqual(errors.map((e) => e.field).sort(), ['slug', 'title']);
+});
+
+test('a body without page errors yields none, so callers need no status check', () => {
+  assert.deepEqual(pageFieldErrors({ error: 'token_scope_required', scope: 'content' }), []);
+  assert.deepEqual(pageFieldErrors({}), []);
+});
+
+test('a non-numeric page key comes back as -1 rather than a bad index', () => {
+  const errors = pageFieldErrors({ pages: { oops: { slug: 'bad' } } });
+  assert.equal(errors[0]?.index, -1);
 });

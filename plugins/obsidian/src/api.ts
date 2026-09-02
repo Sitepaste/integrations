@@ -1,6 +1,12 @@
 import { requestUrl } from 'obsidian';
 
-const API_URL = 'https://sitepaste.com/api/v1/public/pages';
+const API_BASE = 'https://sitepaste.com/api/v1/public';
+
+// The site is part of the URI. 'default' names the workspace's default site,
+// so leaving the setting blank still publishes somewhere sensible.
+function pagesUrl(siteId?: string): string {
+  return `${API_BASE}/sites/${siteId || 'default'}/pages`;
+}
 const REQUEST_TIMEOUT_MS = 120_000;
 
 export interface PagePayload {
@@ -14,6 +20,9 @@ export interface PagePayload {
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
+  // Homepage only: whether recent posts and section listings show below the
+  // content. A real boolean on the wire, unlike the tri-state theme overrides.
+  showListings?: boolean;
   // Optional passthrough fields (author, password, OG image, language, and
   // per-page theme overrides), keyed by API field name — see extractOverrides
   // in utils.ts. Boolean overrides are the API's tri-state strings.
@@ -45,7 +54,6 @@ export interface PagePayload {
 export interface PublishRequest {
   pages: PagePayload[];
   build: boolean;
-  siteId?: string;
 }
 
 export interface PageResult {
@@ -60,11 +68,17 @@ export interface PageResult {
 export interface PublishResponse {
   pages?: PageResult[];
   deleted?: string[];
+  // {status, deployUrl} once the deploy is queued, and {error, code} when it
+  // was refused — the same triple the top-level error envelope uses, so a
+  // refused deploy is read the same way whether it came back nested in a 200
+  // or as the whole response. `scope` joins them when the refusal is that the
+  // token lacks 'deploy'.
   build?: {
     status?: string;
     deployUrl?: string;
     error?: string;
-    message?: string;
+    code?: string;
+    scope?: string;
   };
 }
 
@@ -98,10 +112,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
 export async function publishPages(
   apiKey: string,
   request: PublishRequest,
+  siteId?: string,
 ): Promise<PublishResponse> {
   const response = await withTimeout(
     requestUrl({
-      url: API_URL,
+      url: pagesUrl(siteId),
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,

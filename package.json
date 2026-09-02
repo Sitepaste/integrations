@@ -2,7 +2,7 @@
   "private": true,
   "scripts": {
     "lint": "oxlint plugins/*/src/",
-    "format": "oxfmt plugins/"
+    "format": "oxfmt plugins/*/src/ plugins/*/esbuild.config.mjs"
   },
   "devDependencies": {
     "oxfmt": "^0.13.0",

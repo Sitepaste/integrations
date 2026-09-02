@@ -5,10 +5,14 @@ import os
 import tempfile
 import unittest
 import urllib.error
+import urllib.parse
 from pathlib import Path
 from unittest.mock import patch
 
 from main import (
+    LIST_PAGE_SIZE,
+    api_error_message,
+    error_detail,
     get_input,
     main,
     normalize_section,
@@ -22,6 +26,22 @@ from main import (
 
 def _mock_api(response_data):
     return io.BytesIO(json.dumps(response_data).encode())
+
+
+def _api_http_error(status, body):
+    """The HTTPError urlopen raises for an API error response.
+
+    `body` is written as the API's own envelope — {"error": <sentence>,
+    "code": <stable id>} — so a test that reads it the wrong way round fails
+    here rather than in a run log.
+    """
+    return urllib.error.HTTPError(
+        url="https://sitepaste.com/api/v1/public/sites/default/pages",
+        code=status,
+        msg="",
+        hdrs=http.client.HTTPMessage(),
+        fp=io.BytesIO(json.dumps(body).encode()),
+    )
 
 
 class TestParseFrontMatter(unittest.TestCase):
@@ -218,6 +238,7 @@ class TestMain(unittest.TestCase):
         site_id="",
         dry_run="false",
         prune="false",
+        fail_on_build_error="",
     ):
         env = {
             "INPUT_API_TOKEN": token,
@@ -226,6 +247,7 @@ class TestMain(unittest.TestCase):
             "INPUT_SITE_ID": site_id,
             "INPUT_DRY_RUN": dry_run,
             "INPUT_PRUNE": prune,
+            "INPUT_FAIL_ON_BUILD_ERROR": fail_on_build_error,
         }
         clean = {k: v for k, v in os.environ.items() if not k.startswith("INPUT_")}
         clean.update(env)
@@ -235,6 +257,7 @@ class TestMain(unittest.TestCase):
     def _capture_payload(captured):
         def handler(req, **kw):
             captured["payload"] = json.loads(req.data)
+            captured["url"] = req.full_url
             return _mock_api({"build": {}})
 
         return handler
@@ -512,7 +535,7 @@ class TestMain(unittest.TestCase):
                     main()
                 self.assertEqual(ctx.exception.code, 1)
 
-    def test_includes_site_id_in_payload_when_provided(self):
+    def test_posts_to_the_named_sites_pages_collection(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
             captured = {}
@@ -521,7 +544,18 @@ class TestMain(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
             ):
                 main()
-            self.assertEqual(captured["payload"]["siteId"], "site_123")
+            self.assertIn("/sites/site_123/pages", captured["url"])
+
+    def test_posts_to_the_default_site_when_none_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertIn("/sites/default/pages", captured["url"])
 
     def test_wraps_scalar_tag_in_list(self):
         with tempfile.TemporaryDirectory() as d:
@@ -599,36 +633,85 @@ class TestMain(unittest.TestCase):
             self.assertIn("page-count=1", output)
             self.assertIn("deploy-url=https://example.sitepaste.com", output)
 
-    def test_exits_with_field_errors_on_400_response(self):
+    def test_names_the_offending_file_when_a_page_entry_fails_validation(self):
+        # A batch keys its entry problems by index in "pages", and the whole
+        # point of parsing them is the per-file annotation: without it a run
+        # log says only that something was invalid, not which file.
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
-            error_body = json.dumps({"pages": {"0": {"slug": "invalid slug"}}}).encode()
-            http_error = urllib.error.HTTPError(
-                url="https://sitepaste.com/api/v1/public/pages",
-                code=400,
-                msg="Bad Request",
-                hdrs=http.client.HTTPMessage(),
-                fp=io.BytesIO(error_body),
+            http_error = _api_http_error(
+                422,
+                {
+                    "error": "validation failed",
+                    "code": "validation_failed",
+                    "pages": {"0": {"slug": "slug must not be empty"}},
+                },
             )
 
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
                 patch("main.urllib.request.urlopen", side_effect=http_error),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
                 self.assertRaises(SystemExit) as ctx,
             ):
                 main()
             self.assertEqual(ctx.exception.code, 1)
+            self.assertIn("::error file=post.md::", out.getvalue())
+            self.assertIn("slug must not be empty", out.getvalue())
+
+    def test_reports_entry_and_envelope_problems_from_the_same_response(self):
+        # They are reported independently, so a body carrying both does not
+        # have half of it dropped.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            http_error = _api_http_error(
+                422,
+                {
+                    "error": "validation failed",
+                    "code": "validation_failed",
+                    "pages": {"0": {"slug": "slug must not be empty"}},
+                    "fields": {"deleteSlugs": "deleteSlugs array exceeds 5000 entries"},
+                },
+            )
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=http_error),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
+                self.assertRaises(SystemExit),
+            ):
+                main()
+            self.assertIn("slug must not be empty", out.getvalue())
+            self.assertIn("deleteSlugs array exceeds 5000 entries", out.getvalue())
+
+    def test_names_the_offending_envelope_field_when_the_batch_itself_fails(self):
+        # A problem with the envelope's own fields has one place to point at,
+        # so it comes back in "fields" rather than keyed by entry index.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            http_error = _api_http_error(
+                422,
+                {
+                    "error": "validation failed",
+                    "code": "validation_failed",
+                    "fields": {"pages": "pages array exceeds 5000 entries"},
+                },
+            )
+
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=http_error),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                main()
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertIn("pages array exceeds 5000 entries", out.getvalue())
 
     def test_exits_with_error_on_500_response(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
-            error_body = json.dumps({"error": "internal server error"}).encode()
-            http_error = urllib.error.HTTPError(
-                url="https://sitepaste.com/api/v1/public/pages",
-                code=500,
-                msg="Internal Server Error",
-                hdrs=http.client.HTTPMessage(),
-                fp=io.BytesIO(error_body),
+            http_error = _api_http_error(
+                500, {"error": "failed to save pages", "code": "internal_error"}
             )
 
             with (
@@ -706,32 +789,34 @@ class TestMain(unittest.TestCase):
                     main()
                 self.assertEqual(ctx.exception.code, 1)
 
-    def test_build_warning_does_not_fail_action(self):
-        with tempfile.TemporaryDirectory() as d:
-            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
-            with (
-                patch.dict(os.environ, self._env(content_dir=d), clear=True),
-                patch(
-                    "main.urllib.request.urlopen",
-                    return_value=_mock_api(
-                        {"build": {"error": "quota_exceeded", "message": "Build limit reached"}}
-                    ),
-                ),
-            ):
-                main()
-
 
 class TestPrune(unittest.TestCase):
     _env = staticmethod(TestMain._env)
 
     @staticmethod
     def _prune_api(remote_pages, calls):
-        """Mock urlopen: GET /pages returns remote_pages, POST captures its payload."""
+        """Mock urlopen: GET /pages serves one window, POST captures its payload.
+
+        The GET honours the `limit` and `offset` it is sent and reports the
+        collection's `total`, exactly as the real list does. Serving the
+        whole collection regardless would hide a client that reads only the
+        first window — which is the bug this shape exists to catch.
+        """
 
         def handler(req, **kw):
             calls.append(req)
             if req.get_method() == "GET":
-                return _mock_api({"pages": remote_pages})
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(req.full_url).query)
+                limit = int(query.get("limit", [str(LIST_PAGE_SIZE)])[0])
+                offset = int(query.get("offset", ["0"])[0])
+                return _mock_api(
+                    {
+                        "pages": remote_pages[offset : offset + limit],
+                        "total": len(remote_pages),
+                        "limit": limit,
+                        "offset": offset,
+                    }
+                )
             return _mock_api({"build": {}, "deleted": ["stale"]})
 
         return handler
@@ -758,6 +843,24 @@ class TestPrune(unittest.TestCase):
                     {"slug": "stale-sectioned", "contentType": "docs", "section": "guides"},
                 ],
             )
+
+    def test_prunes_stale_pages_past_the_first_window(self):
+        # The list serves at most one window per call, so a site with more
+        # pages than that would keep every stale page past the first window
+        # while the run still reported success.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
+            remote = [{"slug": "keep", "contentType": "docs"}]
+            remote += [{"slug": f"stale-{i}", "contentType": "docs"} for i in range(LIST_PAGE_SIZE)]
+            calls = []
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, prune="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
+            ):
+                main()
+            payload = json.loads(calls[-1].data)
+            pruned = {entry["slug"] for entry in payload["deleteSlugs"]}
+            self.assertIn(f"stale-{LIST_PAGE_SIZE - 1}", pruned)
 
     def test_matches_by_section_and_slug(self):
         # A local page in section "guides" must not protect a sectionless
@@ -847,7 +950,7 @@ class TestPrune(unittest.TestCase):
                 main()
             self.assertEqual([req.get_method() for req in calls], ["POST"])
 
-    def test_get_includes_content_type_and_site_id(self):
+    def test_get_names_the_site_in_the_path_and_filters_by_content_type(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "keep.md").write_text("---\ntitle: Keep\n---\nbody")
             calls = []
@@ -864,7 +967,7 @@ class TestPrune(unittest.TestCase):
                 main()
             get_url = calls[0].full_url
             self.assertIn("contentType=standalone", get_url)
-            self.assertIn("siteId=site-123", get_url)
+            self.assertIn("/sites/site-123/pages", get_url)
 
     def test_dies_when_listing_remote_pages_fails(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1003,6 +1106,41 @@ class TestContentTypeFrontMatter(unittest.TestCase):
                     main()
                 self.assertEqual(ctx.exception.code, 1)
 
+    def test_show_listings_reaches_the_homepage_payload(self):
+        pages = self._publish_files(
+            {
+                "index.md": "---\ntitle: Home\ncontentType: homepage\nshow_listings: true\n---\nx",
+            }
+        )
+        self.assertIs(pages[0]["showListings"], True)
+
+    def test_show_listings_false_is_sent_rather_than_dropped(self):
+        # An explicit off has to reach the API: dropping it would leave the
+        # homepage on whatever it was last set to.
+        pages = self._publish_files(
+            {
+                "index.md": "---\ntitle: Home\ncontentType: homepage\nshow_listings: false\n---\nx",
+            }
+        )
+        self.assertIs(pages[0]["showListings"], False)
+
+    def test_show_listings_on_a_non_homepage_is_not_sent(self):
+        # It only means anything on a homepage, so sending it elsewhere would
+        # write a setting the page cannot use.
+        pages = self._publish_files(
+            {
+                "guide.md": "---\ntitle: Guide\nshow_listings: true\n---\nx",
+            }
+        )
+        self.assertNotIn("showListings", pages[0])
+
+    def test_a_non_boolean_show_listings_fails_the_run(self):
+        self._fails_validation(
+            {
+                "index.md": "---\ntitle: Home\ncontentType: homepage\nshow_listings: maybe\n---\nx",
+            }
+        )
+
     def test_homepage_front_matter_publishes_the_site_homepage(self):
         pages = self._publish_files(
             {
@@ -1048,6 +1186,165 @@ class TestContentTypeFrontMatter(unittest.TestCase):
                 "post.md": "---\ntitle: P\ncontentType: article\n---\nx",
             }
         )
+
+
+class TestErrorDetail(unittest.TestCase):
+    """The API's envelope is {"error": <sentence>, "code": <stable id>}.
+
+    `error` is the sentence to show and `code` is the identifier to branch
+    on. Reading them the other way round matches nothing and silently drops
+    every tailored message, so each case here sends the shape the API sends.
+    """
+
+    def test_names_the_missing_scope_and_the_remedy(self):
+        detail = error_detail(
+            {
+                "error": 'this token does not carry the "deploy" scope',
+                "code": "token_scope_required",
+                "scope": "deploy",
+            }
+        )
+        self.assertIn('"deploy" scope', detail)
+        self.assertIn("Account > Tokens", detail)
+
+    def test_does_not_guess_a_scope_the_body_did_not_name(self):
+        detail = error_detail({"error": "scope missing", "code": "token_scope_required"})
+        self.assertIn("Account > Tokens", detail)
+        self.assertNotIn('"content"', detail)
+
+    def test_shows_the_sentence_and_keeps_the_code_for_the_reader(self):
+        detail = error_detail(
+            {
+                "error": "The monthly build limit for your plan has been reached.",
+                "code": "quota_exceeded",
+            }
+        )
+        self.assertIn("The monthly build limit for your plan has been reached.", detail)
+        self.assertIn("quota_exceeded", detail)
+
+    def test_shows_the_sentence_alone_when_no_code_travels_with_it(self):
+        self.assertEqual(error_detail({"error": "something went wrong"}), "something went wrong")
+
+    def test_reports_unknown_error_for_an_empty_body(self):
+        self.assertEqual(error_detail({}), "unknown error")
+
+
+class TestApiErrorMessage(unittest.TestCase):
+    def test_prefixes_the_detail_with_the_http_status(self):
+        self.assertEqual(
+            api_error_message(500, {"error": "failed to save pages", "code": "internal_error"}),
+            "api returned 500: failed to save pages (internal_error)",
+        )
+
+
+class TestBuildErrorHandling(unittest.TestCase):
+    """A refused deploy leaves the pages saved and the site on its old build."""
+
+    _env = staticmethod(TestMain._env)
+
+    @staticmethod
+    def _refused_build():
+        return _mock_api(
+            {
+                "build": {
+                    "error": "The hourly limit of 300 deploys was reached."
+                    " The content was saved; trigger the deploy once the limit resets.",
+                    "code": "rate_limited",
+                }
+            }
+        )
+
+    def test_fails_the_run_by_default(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                main()
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_warns_instead_when_fail_on_build_error_is_false(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            env = self._env(content_dir=d, fail_on_build_error="false")
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+            ):
+                main()  # no SystemExit
+
+    def test_page_count_is_still_reported_when_the_deploy_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            out_file = Path(d) / "github_output.txt"
+            out_file.write_text("")
+            env = self._env(content_dir=d)
+            env["GITHUB_OUTPUT"] = str(out_file)
+
+            with (
+                patch.dict(os.environ, env, clear=True),
+                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+                self.assertRaises(SystemExit),
+            ):
+                main()
+
+            output = out_file.read_text()
+            self.assertIn("page-count=1", output)
+            self.assertNotIn("deploy-url=", output)
+
+    def test_a_quota_refusal_also_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            refused = _mock_api(
+                {
+                    "build": {
+                        "error": "The monthly build limit for your plan has been reached.",
+                        "code": "quota_exceeded",
+                    }
+                }
+            )
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", return_value=refused),
+                self.assertRaises(SystemExit) as ctx,
+            ):
+                main()
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_a_null_build_field_is_not_a_refusal(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", return_value=_mock_api({"build": None})),
+            ):
+                main()  # no SystemExit
+
+    def test_a_token_without_the_deploy_scope_is_told_which_scope_is_missing(self):
+        # The commonest way a run reaches this branch is a token minted with
+        # `content` alone. The scope travels in a field of its own, so a run
+        # log that does not name it leaves the reader with no remedy.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            refused = _mock_api(
+                {
+                    "build": {
+                        "error": 'This token does not carry the "deploy" scope.',
+                        "code": "token_scope_required",
+                        "scope": "deploy",
+                    }
+                }
+            )
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", return_value=refused),
+                patch("sys.stdout", new_callable=io.StringIO) as out,
+                self.assertRaises(SystemExit),
+            ):
+                main()
+            self.assertIn('"deploy" scope', out.getvalue())
 
 
 if __name__ == "__main__":

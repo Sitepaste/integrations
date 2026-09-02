@@ -3,6 +3,7 @@ import type { PagePayload, PublishResponse } from './api';
 import {
   byteLen,
   extractOverrides,
+  extractShowListings,
   normalizeSection,
   slugify,
   titleize,
@@ -26,6 +27,7 @@ export interface FilePublishInfo {
   draft?: boolean;
   tags?: string[];
   publishedAt?: string;
+  showListings?: boolean;
   overrides: PageOverrides;
   isUpdate: boolean;
   errors: ValidationError[];
@@ -113,6 +115,7 @@ export async function prepareFile(
   const isUpdate = !!fm['sitepaste-slug'];
 
   const { overrides, errors: overrideErrors } = extractOverrides(fm);
+  const { showListings, errors: showListingsErrors } = extractShowListings(fm, contentType);
 
   const errors = validatePage({
     slug,
@@ -131,7 +134,7 @@ export async function prepareFile(
       message: `"${fmContentType}" is not a valid content type`,
     });
   }
-  errors.push(...overrideErrors);
+  errors.push(...overrideErrors, ...showListingsErrors);
 
   return {
     file,
@@ -145,6 +148,7 @@ export async function prepareFile(
     draft,
     tags,
     publishedAt,
+    showListings,
     overrides,
     isUpdate,
     errors,
@@ -170,6 +174,7 @@ export async function doPublish(
     if (info.draft !== undefined) page.draft = info.draft;
     if (info.tags) page.tags = info.tags;
     if (info.publishedAt) page.publishedAt = info.publishedAt;
+    if (info.showListings !== undefined) page.showListings = info.showListings;
     Object.assign(page, info.overrides);
     return page;
   });
@@ -177,10 +182,9 @@ export async function doPublish(
   const request = {
     pages,
     build: triggerBuild ?? settings.triggerBuild,
-    ...(settings.siteId ? { siteId: settings.siteId } : {}),
   };
 
-  return publishPages(settings.apiKey, request);
+  return publishPages(settings.apiKey, request, settings.siteId);
 }
 
 export async function updateFrontmatter(app: App, file: TFile, slug: string): Promise<void> {
