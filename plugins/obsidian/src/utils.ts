@@ -121,6 +121,12 @@ const VALID_FONT_SIZES = new Set(['compact', 'comfortable', 'large']);
 // included), at most 35 characters.
 const LANGUAGE_RE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*$/;
 const MAX_LANGUAGE_LENGTH = 35;
+// The API parses publishedAt as RFC 3339 and nothing else, so this is the
+// shape it takes: a T separator, seconds, an optional fractional part, and a
+// zone of "Z" or +hh:mm. Date on its own is far looser — it reads a zoneless
+// timestamp, and a good deal that is not a timestamp at all — so a note the
+// API would refuse used to reach it and come back a 422.
+const PUBLISHED_AT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
 /** Optional page fields keyed by API payload field name. */
 export type PageOverrides = Record<string, string>;
@@ -340,7 +346,7 @@ export function validatePage(page: {
 
   if (page.publishedAt) {
     const d = new Date(page.publishedAt);
-    if (isNaN(d.getTime())) {
+    if (!PUBLISHED_AT_RE.test(page.publishedAt) || isNaN(d.getTime())) {
       errors.push({
         field: 'publishedAt',
         message: 'invalid date format; expected ISO 8601 (e.g. 2025-01-15T12:00:00Z)',
@@ -406,10 +412,9 @@ function asSentence(detail: string): string {
  * Render the API's error triple as one sentence for the user.
  *
  * The envelope is `{error, code}`: `error` is the human sentence to show and
- * `code` is the stable identifier to branch on. The batch's `build` field
- * carries the same keys, deliberately, so a refused deploy reads the
- * same whether it came back nested in a 200 or as the whole response — which
- * is why this renders the triple and the caller supplies the context.
+ * `code` is the stable identifier to branch on. Every refusal on this API
+ * uses it, the page write and the deploy alike, which is why this renders the
+ * triple and the caller supplies the context.
  *
  * A missing scope gets its own sentence. The API's own wording names the
  * scope but not the remedy, and the remedy is the part that matters: scopes
@@ -429,6 +434,20 @@ export function errorDetail(body: Record<string, unknown>): string {
     return 'Your Sitepaste subscription is past due. Publishing resumes once billing is up to date.';
   }
   return detail;
+}
+
+/**
+ * What to tell the user when a deploy was refused after the pages were saved.
+ *
+ * Never empty, which is the whole point of it. errorDetail has nothing to
+ * render when the refusal carried no envelope — a proxy's HTML 502 on the way
+ * to the API, say — and the callers show this only when it is truthy, so an
+ * empty one reports a refused deploy as a clean publish and leaves the site
+ * on its previous build with nothing said. The status is what is left to say
+ * in that case, and saying it is better than saying nothing.
+ */
+export function deployRefusalMessage(status: number, body: Record<string, unknown>): string {
+  return errorDetail(body) || `the deploy was refused (HTTP ${status})`;
 }
 
 /**

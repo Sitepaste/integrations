@@ -3,6 +3,7 @@ import { DEFAULT_SETTINGS, SitepasteSettingTab, type SitepasteSettings } from '.
 import {
   prepareFile,
   doPublish,
+  deployAfterPublish,
   updateFrontmatter,
   collectMarkdownFiles,
   splitIntoBatches,
@@ -11,14 +12,8 @@ import {
 import { DryRunModal } from './modals/dry-run';
 import { ConfirmModal } from './modals/confirm';
 import { ProgressModal } from './modals/progress';
-import { ApiError, type PublishResponse } from './api';
-import {
-  apiErrorMessage,
-  envelopeFieldErrors,
-  errorDetail,
-  pageFieldErrors,
-  pagePath,
-} from './utils';
+import { ApiError } from './api';
+import { apiErrorMessage, envelopeFieldErrors, pageFieldErrors, pagePath } from './utils';
 
 export default class SitepastePlugin extends Plugin {
   settings: SitepasteSettings = { ...DEFAULT_SETTINGS };
@@ -127,7 +122,7 @@ export default class SitepastePlugin extends Plugin {
 
   private async doSinglePublish(info: FilePublishInfo): Promise<void> {
     try {
-      const result = await doPublish(this.settings, [info]);
+      await doPublish(this.settings, [info]);
 
       let frontmatterFailed = false;
       try {
@@ -141,10 +136,15 @@ export default class SitepastePlugin extends Plugin {
       if (frontmatterFailed) {
         msg += '\nWarning: could not update local frontmatter.';
       }
-      if (result.build?.deployUrl) {
-        msg += `\nDeployed to ${result.build.deployUrl}`;
-      } else if (result.build?.error) {
-        msg += `\nBuild skipped: ${errorDetail(result.build)}`;
+      // The page is saved by now, so the deploy is reported alongside it
+      // rather than failing the publish it follows.
+      if (this.settings.triggerBuild) {
+        const deploy = await deployAfterPublish(this.settings);
+        if (deploy.deployUrl) {
+          msg += `\nDeployed to ${deploy.deployUrl}`;
+        } else if (deploy.error) {
+          msg += `\nBuild skipped: ${deploy.error}`;
+        }
       }
       new Notice(msg, frontmatterFailed ? 8000 : 5000);
     } catch (err) {
@@ -244,21 +244,16 @@ export default class SitepastePlugin extends Plugin {
       const batches = splitIntoBatches(infos);
       let publishedCount = 0;
       const failedIndices = new Set<number>();
-      let lastResult: PublishResponse | undefined;
       let globalIdx = 0;
 
       for (let b = 0; b < batches.length; b++) {
         const batch = batches[b];
-        const isLast = b === batches.length - 1;
         const batchLabel = batches.length > 1 ? ` (batch ${b + 1}/${batches.length})` : '';
         modal.setStatus(`Publishing ${batch.length} page(s)${batchLabel}...`);
 
         try {
-          // Only build on the last batch if all previous batches succeeded
-          const shouldBuild = isLast && this.settings.triggerBuild && failedIndices.size === 0;
-          const result = await doPublish(this.settings, batch, shouldBuild);
+          await doPublish(this.settings, batch);
           publishedCount += batch.length;
-          lastResult = result;
         } catch (err) {
           for (let i = 0; i < batch.length; i++) {
             failedIndices.add(globalIdx + i);
@@ -309,14 +304,19 @@ export default class SitepastePlugin extends Plugin {
       if (frontmatterFailures > 0) {
         summary += ` ${frontmatterFailures} file(s) could not be updated locally.`;
       }
-      if (lastResult?.build?.deployUrl) {
-        summary += ` Deployed to ${lastResult.build.deployUrl}`;
-      } else if (lastResult?.build?.error) {
-        const why = errorDetail(lastResult.build);
-        summary += ` Build skipped: ${why}`;
-        modal.log(`Build: ${why}`);
-      } else if (failedIndices.size > 0 && this.settings.triggerBuild) {
+      // One deploy for the whole run, after every batch has landed, and only
+      // when they all did: publishing a run that half failed would put a
+      // partial vault live.
+      if (this.settings.triggerBuild && failedIndices.size > 0) {
         summary += ' Build skipped due to failures.';
+      } else if (this.settings.triggerBuild) {
+        const deploy = await deployAfterPublish(this.settings);
+        if (deploy.deployUrl) {
+          summary += ` Deployed to ${deploy.deployUrl}`;
+        } else if (deploy.error) {
+          summary += ` Build skipped: ${deploy.error}`;
+          modal.log(`Build: ${deploy.error}`);
+        }
       }
       modal.setComplete(summary);
     } catch (err) {

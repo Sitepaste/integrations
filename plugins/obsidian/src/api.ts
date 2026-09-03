@@ -4,8 +4,17 @@ const API_BASE = 'https://sitepaste.com/api/v1/public';
 
 // The site is part of the URI. 'default' names the workspace's default site,
 // so leaving the setting blank still publishes somewhere sensible.
-function pagesUrl(siteId?: string): string {
-  return `${API_BASE}/sites/${siteId || 'default'}/pages`;
+//
+// Writing many pages goes to the collection's /batch sub-resource: a POST to
+// the collection itself creates one page and refuses the envelope. Publishing
+// is a second request to /deployments, so a refused deploy is its own status
+// code rather than a field buried in the write's 200.
+function pagesBatchUrl(siteId?: string): string {
+  return `${API_BASE}/sites/${siteId || 'default'}/pages/batch`;
+}
+
+function deploymentsUrl(siteId?: string): string {
+  return `${API_BASE}/sites/${siteId || 'default'}/deployments`;
 }
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -53,7 +62,6 @@ export interface PagePayload {
 
 export interface PublishRequest {
   pages: PagePayload[];
-  build: boolean;
 }
 
 export interface PageResult {
@@ -68,18 +76,13 @@ export interface PageResult {
 export interface PublishResponse {
   pages?: PageResult[];
   deleted?: string[];
-  // {status, deployUrl} once the deploy is queued, and {error, code} when it
-  // was refused — the same triple the top-level error envelope uses, so a
-  // refused deploy is read the same way whether it came back nested in a 200
-  // or as the whole response. `scope` joins them when the refusal is that the
-  // token lacks 'deploy'.
-  build?: {
-    status?: string;
-    deployUrl?: string;
-    error?: string;
-    code?: string;
-    scope?: string;
-  };
+}
+
+// The deploy's own 202 body. A refusal is an ApiError instead, carrying the
+// same {error, code, scope} envelope every other refusal on this API uses.
+export interface DeployResponse {
+  status?: string;
+  deployUrl?: string;
 }
 
 export class ApiError extends Error {
@@ -116,7 +119,7 @@ export async function publishPages(
 ): Promise<PublishResponse> {
   const response = await withTimeout(
     requestUrl({
-      url: pagesUrl(siteId),
+      url: pagesBatchUrl(siteId),
       method: 'POST',
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -145,5 +148,43 @@ export async function publishPages(
     throw new Error(
       'Publish may have succeeded but the response could not be parsed. Check the dashboard.',
     );
+  }
+}
+
+// triggerDeploy publishes what publishPages just wrote.
+//
+// It is called only once the writes have landed, so a publish that failed is
+// never followed by a build of the old content. A refusal throws an ApiError
+// like any other, which is what lets the caller tell "the pages are saved but
+// the site is still on its previous build" from "the pages were not saved".
+export async function triggerDeploy(apiKey: string, siteId?: string): Promise<DeployResponse> {
+  const response = await withTimeout(
+    requestUrl({
+      url: deploymentsUrl(siteId),
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'User-Agent': 'Sitepaste-Obsidian',
+      },
+      throw: false,
+    }),
+    REQUEST_TIMEOUT_MS,
+  );
+
+  if (response.status >= 400) {
+    let body: Record<string, unknown> = {};
+    try {
+      body = response.json;
+    } catch {
+      // noop
+    }
+    throw new ApiError(response.status, body);
+  }
+
+  try {
+    return response.json as DeployResponse;
+  } catch {
+    // The deploy is queued either way; only the URL to report is lost.
+    return {};
   }
 }

@@ -17,6 +17,19 @@ def pages_url(site_id):
     return f"{API_BASE}/sites/{site_id or 'default'}/pages"
 
 
+def pages_batch_url(site_id):
+    """Where many page writes land in one transaction. A POST to the
+    collection itself creates one page; a whole directory is a batch."""
+    return pages_url(site_id) + "/batch"
+
+
+def deployments_url(site_id):
+    """The site's deployments collection. Publishing is its own request, so a
+    refused deploy is a status code rather than a field inside the write's
+    200."""
+    return f"{API_BASE}/sites/{site_id or 'default'}/deployments"
+
+
 TYPES = {"docs", "blog", "standalone"}
 # The largest window GET /sites/{siteId}/pages serves in one call.
 LIST_PAGE_SIZE = 1000
@@ -66,6 +79,12 @@ VALID_FONT_SIZES = {"compact", "comfortable", "large"}
 # included), at most 35 characters.
 LANGUAGE_RE = re.compile(r"[A-Za-z]{2,3}(-[A-Za-z0-9]{1,8})*")
 MAX_LANGUAGE_LENGTH = 35
+# The shape the API's RFC 3339 parse accepts: a T separator, seconds, an
+# optional fractional part, and a zone of "Z" or +hh:mm. See
+# is_valid_published_at.
+PUBLISHED_AT_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})$"
+)
 
 
 def get_input(name):
@@ -103,10 +122,9 @@ def error_detail(data):
     """Render the API's error triple as one human sentence.
 
     The envelope is {"error": <sentence>, "code": <stable id>}: `error` is
-    what to show and `code` is what to branch on. The batch's `build` field
-    carries the same keys, deliberately, so a refused deploy reads the
-    same whether it came back nested in a 200 or as the whole response —
-    which is why this renders the triple and the caller supplies the context.
+    what to show and `code` is what to branch on. Every refusal on this API
+    uses it, the page write and the deploy alike, which is why this renders
+    the triple and the caller supplies the context.
 
     A missing scope gets its own sentence. The API's own wording names the
     scope but not the remedy, and the remedy is the part a run log needs:
@@ -221,6 +239,24 @@ def titleize(slug):
     return " ".join(w[0].upper() + w[1:] for w in slug.split("-") if w)
 
 
+def text_attr(attrs, key, rel):
+    """One front matter value that has to be text, as (value, ok).
+
+    The parser keeps `true`, `false`, and bracketed lists as the types they
+    name, because `draft` and `tags` are read as those. A key that means text
+    getting one instead is a mistake in the file, and reading it as text
+    ended the run with a traceback that named neither the file nor the field.
+    An absent key is (None, True): optional is not the same as wrong.
+    """
+    if key not in attrs:
+        return None, True
+    value = attrs[key]
+    if isinstance(value, str):
+        return value, True
+    error(f"{key} must be text", rel)
+    return None, False
+
+
 def is_valid_slug(slug):
     if not slug:
         return False
@@ -242,11 +278,32 @@ def is_valid_tag(tag):
 
 
 def is_valid_published_at(s):
-    try:
-        datetime.fromisoformat(s)
-        return True
-    except (ValueError, TypeError):
+    """Whether the API will accept this as a publishedAt.
+
+    The API parses the field as RFC 3339 and nothing else, so this checks
+    exactly that: a T separator, seconds, and a zone that is either "Z" or
+    +hh:mm. A local run that accepts more than the server does not save
+    anyone the round trip, and one that accepts less fails a file the site
+    would have taken.
+
+    datetime.fromisoformat is deliberately not used for it. Before Python
+    3.11 it rejects the trailing "Z" this action itself appends to a
+    date-only value, so on a runner with an older interpreter every dated
+    page failed validation; and from 3.11 it accepts a space separator and a
+    zoneless timestamp, neither of which the API takes. The offset's own
+    range is left to the server, which is the only place that can be
+    authoritative about it, and the shape above is what a mistyped date
+    actually gets wrong.
+    """
+    m = PUBLISHED_AT_RE.match(s)
+    if not m:
         return False
+    year, month, day, hour, minute, second = (int(g) for g in m.group(1, 2, 3, 4, 5, 6))
+    try:
+        datetime(year, month, day)
+    except ValueError:
+        return False
+    return hour <= 23 and minute <= 59 and second <= 59
 
 
 def find_relative_images(text):
@@ -398,10 +455,13 @@ def main():
                 )
                 valid = False
 
-        slug = attrs.get("slug") or slugify(rel)
+        fm_slug, slug_ok = text_attr(attrs, "slug", rel)
+        fm_title, title_ok = text_attr(attrs, "title", rel)
+        valid = valid and slug_ok and title_ok
+        slug = fm_slug or slugify(rel)
         if file_content_type == "homepage":
             slug = "index"  # the homepage's fixed slug, as in the dashboard
-        title = attrs.get("title") or titleize(slug)
+        title = fm_title or titleize(slug)
 
         # extract section from directory structure. Standalone sections may
         # nest one level (api/builds/x.md -> section "api/builds"), matching
@@ -465,8 +525,10 @@ def main():
         if title_size > 200:
             error(f"title exceeds 200 byte limit ({title_size} bytes)", rel)
             valid = False
-        if attrs.get("description"):
-            desc_size = len(attrs["description"].encode("utf-8"))
+        description, description_ok = text_attr(attrs, "description", rel)
+        valid = valid and description_ok
+        if description:
+            desc_size = len(description.encode("utf-8"))
             if desc_size > 500:
                 error(f"description exceeds 500 byte limit ({desc_size} bytes)", rel)
                 valid = False
@@ -505,8 +567,8 @@ def main():
         page = {"slug": slug, "title": title, "content": body, "contentType": file_content_type}
         if section:
             page["section"] = section
-        if "description" in attrs:
-            page["description"] = attrs["description"]
+        if description is not None:
+            page["description"] = description
         if api_endpoint:
             page["apiEndpoint"] = api_endpoint
         if "draft" in attrs:
@@ -545,7 +607,15 @@ def main():
                     valid = False
             if tags:
                 page["tags"] = tags
-        pa = attrs.get("publishedAt") or attrs.get("date")
+        # `date` stands in for an absent or empty publishedAt, as it always
+        # has. Both are read either way, so a wrong type in the one being
+        # stood in for is still reported rather than passed over.
+        pa, published_at_ok = text_attr(attrs, "publishedAt", rel)
+        if not pa:
+            fallback, date_ok = text_attr(attrs, "date", rel)
+            published_at_ok = published_at_ok and date_ok
+            pa = pa or fallback
+        valid = valid and published_at_ok
         if pa:
             published_at = pa + "T00:00:00Z" if is_date_only(pa) else pa
             if not is_valid_published_at(published_at):
@@ -652,13 +722,13 @@ def main():
         return
 
     pages = [page for _, page in entries]
-    payload = {"pages": pages, "build": True}
+    payload = {"pages": pages}
     if delete_slugs:
         payload["deleteSlugs"] = delete_slugs
 
     body_bytes = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        pages_url(site_id),
+        pages_batch_url(site_id),
         data=body_bytes,
         headers={
             "Authorization": f"Bearer {token}",
@@ -711,17 +781,61 @@ def main():
     if delete_slugs:
         print(f"Pruned {len(data.get('deleted', []))} page(s).")
 
-    # The page writes are already committed by the time a deploy is refused,
-    # so the outputs above are set either way and only the deploy is in doubt.
-    build = data.get("build") or {}
-    if build.get("error"):
-        msg = f"pages were saved but the deploy was not queued: {error_detail(build)}"
+    # Publishing is its own request, sent once the writes have landed, so a
+    # directory that failed to sync is never followed by a build of the old
+    # content. The page writes are already committed by the time it runs, so
+    # the outputs above are set either way and only the deploy is in doubt.
+    deploy(token, site_id, fail_on_build_error)
+
+
+def deploy(token, site_id, fail_on_build_error):
+    """Queue the deploy that publishes what was just written.
+
+    A refusal is this request's own status code and error envelope, not a
+    field inside the write's 200, so it is read exactly like every other
+    error here. Whether it should fail the run is the caller's call: a run on
+    every push wants a red check when the site is still serving its previous
+    build, while a repository that deploys on a schedule does not. See
+    fail-on-build-error.
+    """
+    req = urllib.request.Request(
+        deployments_url(site_id),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "Sitepaste-Deploy",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read())
+        except Exception:
+            data = {}
+        msg = f"pages were saved but the deploy was not queued: {error_detail(data)}"
         if fail_on_build_error:
             die(f"{msg} (set fail-on-build-error: 'false' to treat this as a warning)")
         warn(msg)
-    elif build.get("deployUrl"):
-        set_output("deploy-url", build["deployUrl"])
-        print(f"Deployed to {build['deployUrl']}")
+        return
+    except urllib.error.URLError as e:
+        msg = f"pages were saved but the deploy request failed: {e.reason}"
+        if fail_on_build_error:
+            die(f"{msg} (set fail-on-build-error: 'false' to treat this as a warning)")
+        warn(msg)
+        return
+    except TimeoutError:
+        msg = "pages were saved but the deploy request timed out after 120 seconds"
+        if fail_on_build_error:
+            die(f"{msg} (set fail-on-build-error: 'false' to treat this as a warning)")
+        warn(msg)
+        return
+
+    deploy_url = (data or {}).get("deployUrl")
+    if deploy_url:
+        set_output("deploy-url", deploy_url)
+        print(f"Deployed to {deploy_url}")
 
 
 if __name__ == "__main__":

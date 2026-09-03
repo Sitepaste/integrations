@@ -8,7 +8,7 @@ Publish markdown files directly from Obsidian. Publish a single file or an entir
 2. Enable the plugin in Settings > Community Plugins.
 3. Go to Settings > Sitepaste and enter your API key, created in the dashboard under Account > Tokens.
 
-The token needs the `content` and `deploy` scopes. `content` publishes the notes and `deploy` puts them live. Scopes are chosen when a token is created and cannot be changed afterwards, so a token minted without them has to be replaced. The build travels in the same `POST /sites/{siteId}/pages` request that publishes the notes, but it is the same deploy `POST /sites/{siteId}/deployments` queues, and it requires that route's scope. With `content` alone the notes still publish and only the build is refused, which is the same outcome as turning **Trigger build** off.
+The token needs the `content` and `deploy` scopes. `content` publishes the notes through `POST /sites/{siteId}/pages/batch`, and `deploy` puts them live through `POST /sites/{siteId}/deployments`, which the plugin sends once the notes have been saved. Scopes are chosen when a token is created and cannot be changed afterwards, so a token minted without them has to be replaced. With `content` alone the notes still publish and only the build is refused, which is the same outcome as turning **Trigger build** off.
 
 ## Settings
 
@@ -32,7 +32,7 @@ The token needs the `content` and `deploy` scopes. `content` publishes the notes
 
 - Right-click a folder > `Publish folder to Sitepaste`
 
-All markdown files in the folder (recursively) are published together. Large folders are split into several batch requests, and only the last one triggers the build, so a folder publish costs one deploy however many files it carries.
+All markdown files in the folder (recursively) are published together. Large folders are split into several batch requests, and the deploy is sent once after the last of them, so a folder publish costs one deploy however many files it carries. A run in which any batch failed does not deploy at all, rather than putting a half-published vault live.
 
 ## Frontmatter
 
@@ -61,7 +61,7 @@ publishedAt: 2025-01-15
 | `api_endpoint` | Marks the page as an API reference: an HTTP method optionally followed by a path, like `GET /sites/{siteId}/pages/{slug}` (max 200 chars). The method shows as a badge next to the page in the site navigation. |
 | `draft` | `true` or `false`. |
 | `tags` | Array of tags (max 20, each max 30 chars). |
-| `publishedAt` | ISO date or datetime. Also reads `date`. |
+| `publishedAt` | A date (`2025-01-15`, taken as midnight UTC) or an RFC 3339 timestamp, which has to carry a zone: `2025-01-15T12:00:00Z` or `+02:00`. Also reads `date`. |
 | `show_listings` | Homepage only: whether recent posts and section listings show below the content. `true` or `false`. Ignored on any other content type. |
 | `author` | Author to credit the page to, as an author ID from `GET /api/v1/public/sites/{siteId}/authors` — not a name, since author names are not unique. An empty string removes the author. |
 | `password` | Password-protects the page (min 8 chars, Pro plan). An empty string removes the protection. Your vault is private, so this is as safe as typing it in the dashboard — but avoid it in a vault synced to a shared repository. |

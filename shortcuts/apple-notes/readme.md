@@ -9,7 +9,7 @@ Requires a Pro plan, as API tokens can only be created and used on the Pro plan.
 - API token from Account > Tokens in the dashboard (`sp_...`).
 - macOS Monterey or later, or iOS 15 or later.
 
-Both shortcuts need a token with the `content` and `deploy` scopes, because they publish and then deploy. A deploy requires the `deploy` scope whether it is asked for with `build: true` in the same request or with a separate call to `POST /sites/{siteId}/deployments`. Scopes are chosen when the token is created and cannot be changed afterwards.
+Both shortcuts need a token with the `content` and `deploy` scopes, because they publish and then deploy. Publishing is always its own call to `POST /sites/{siteId}/deployments`, which is what the `deploy` scope gates. Scopes are chosen when the token is created and cannot be changed afterwards.
 
 ## Publish a folder
 
@@ -29,7 +29,7 @@ These actions go at the top of the shortcut. Edit them once to match your config
 5. Add a Count action. Name the output `Note Count`.
 6. Add a Repeat with Each action over the notes from step 4.
 
-Inside the loop, add a single Get Contents of URL action. Set the URL to `https://sitepaste.com/api/v1/public/sites/default/pages` and the method to `POST`. Add a header with key `Authorization` and value `Bearer ` followed by the `API Key` variable. Set the request body to JSON with one field:
+Inside the loop, add a single Get Contents of URL action. Set the URL to `https://sitepaste.com/api/v1/public/sites/default/pages/batch` and the method to `POST`. Add a header with key `Authorization` and value `Bearer ` followed by the `API Key` variable. Set the request body to JSON with one field:
 
 | Key | Type | Value |
 |---|---|---|
@@ -66,12 +66,11 @@ Create a new shortcut named `Publish Note to Sitepaste`.
 1. Add a Text action with your API token (`sp_...`). Name the output `API Key`.
 2. Add a Choose from Menu action with three options: `Blog`, `Docs`, and `Standalone`. Under each branch, add a Text action containing `blog`, `docs`, or `standalone`. Name the output after the End Menu marker `Content Type`.
 3. Add a Find Notes action. Set the sort to `Last Modified Date` and enable the limit with a value like `25`. Add a Choose from List action. Name the output `Note`.
-4. Add a Get Contents of URL action. Set the URL to `https://sitepaste.com/api/v1/public/sites/default/pages` and the method to `POST`. Add a header with key `Authorization` and value `Bearer ` followed by the `API Key` variable. Set the request body to JSON with these fields:
+4. Add a Get Contents of URL action. Set the URL to `https://sitepaste.com/api/v1/public/sites/default/pages/batch` and the method to `POST`. Add a header with key `Authorization` and value `Bearer ` followed by the `API Key` variable. Set the request body to JSON with one field:
 
 | Key | Type | Value |
 |---|---|---|
 | `pages` | Array | A single Dictionary item, with the keys below |
-| `build` | Boolean | `true`, so the note publishes and the site deploys in one request |
 
 Inside the Dictionary item:
 
@@ -85,20 +84,21 @@ Inside the Dictionary item:
 The body the action sends should look like this:
 
 ```json
-{ "pages": [{ "title": "My note", "content": "...", "contentType": "blog" }], "build": true }
+{ "pages": [{ "title": "My note", "content": "...", "contentType": "blog" }] }
 ```
 
-5. Add a Get Dictionary Value action for the key `error` from the previous result. Add an If action with the condition `has any value`. Under the If branch, add a Show Alert action with "Error:" followed by the result. Under the Otherwise branch, add a Show Alert with "Published to Sitepaste."
+5. Add a second Get Contents of URL action. Set the URL to `https://sitepaste.com/api/v1/public/sites/default/deployments` and the method to `POST`. Add the same `Authorization` header. No request body is needed.
+6. Add a Get Dictionary Value action for the key `error` from the previous result. Add an If action with the condition `has any value`. Under the If branch, add a Show Alert action with "Error:" followed by the result. Under the Otherwise branch, add a Show Alert with "Published to Sitepaste."
 
 The slug is auto-generated from the title. Publishing the same note again updates the existing page.
 
-The note is saved before the deploy is queued, so a refused deploy does not lose the note: it comes back in the response's `build` field rather than in `error`, and the next run deploys it along with whatever else changed.
+The note is saved before the deploy is queued, so a refused deploy does not lose the note. The deploy is its own request, so its refusal is that request's own error rather than anything the publish reports, and the next run deploys the note along with whatever else changed.
 
 ## How it works
 
-Each note is sent to `POST /api/v1/public/sites/default/pages` as one entry in the request's `pages` array. The `pages` key is what makes the request a batch: the same route also takes a single page as a flat object with `title` and `content` at the top level, but that form creates a page and answers `409` if one already exists, where the batch updates it. Both shortcuts re-publish the same notes over time, so both use the array.
+Each note is sent to `POST /api/v1/public/sites/default/pages/batch` as one entry in the request's `pages` array. The collection itself, `POST /api/v1/public/sites/default/pages`, takes a single page as a flat object with `title` and `content` at the top level, but that form creates a page and answers `409` if one already exists, where a batch entry updates it. Both shortcuts re-publish the same notes over time, so both use the batch.
 
-The single-note shortcut sets `build: true` and is done in one request. The folder shortcut posts each note on its own and then calls `POST /api/v1/public/sites/default/deployments` once, after the loop.
+Both shortcuts then call `POST /api/v1/public/sites/default/deployments` to publish, the single-note one straight after its write and the folder one once after the loop, so a folder of any size costs a single deploy.
 
 Pages are created or updated by slug. Existing pages not in the batch are left untouched.
 

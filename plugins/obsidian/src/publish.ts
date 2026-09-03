@@ -7,13 +7,14 @@ import {
   normalizeSection,
   slugify,
   titleize,
+  deployRefusalMessage,
   validatePage,
   VALID_CONTENT_TYPES,
   type PageOverrides,
   type ValidationError,
 } from './utils';
 import type { SitepasteSettings } from './settings';
-import { publishPages } from './api';
+import { ApiError, publishPages, triggerDeploy } from './api';
 
 export interface FilePublishInfo {
   file: TFile;
@@ -158,7 +159,6 @@ export async function prepareFile(
 export async function doPublish(
   settings: SitepasteSettings,
   infos: FilePublishInfo[],
-  triggerBuild?: boolean,
 ): Promise<PublishResponse> {
   const pages: PagePayload[] = infos.map((info) => {
     const page: PagePayload = {
@@ -179,12 +179,29 @@ export async function doPublish(
     return page;
   });
 
-  const request = {
-    pages,
-    build: triggerBuild ?? settings.triggerBuild,
-  };
+  return publishPages(settings.apiKey, { pages }, settings.siteId);
+}
 
-  return publishPages(settings.apiKey, request, settings.siteId);
+// deployAfterPublish queues the deploy that publishes what doPublish wrote,
+// and reports what to tell the user rather than throwing.
+//
+// The pages are already saved by the time it runs, so a refused deploy is not
+// a failed publish: the site simply stays on its previous build until the next
+// one. Returning the outcome instead of throwing is what keeps that distinct
+// from a failed write in the caller, which has a different thing to say about
+// each.
+export async function deployAfterPublish(
+  settings: SitepasteSettings,
+): Promise<{ deployUrl?: string; error?: string }> {
+  try {
+    const result = await triggerDeploy(settings.apiKey, settings.siteId);
+    return { deployUrl: result.deployUrl };
+  } catch (err) {
+    if (err instanceof ApiError) {
+      return { error: deployRefusalMessage(err.status, err.body) };
+    }
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
 }
 
 export async function updateFrontmatter(app: App, file: TFile, slug: string): Promise<void> {

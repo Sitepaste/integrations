@@ -1,3 +1,4 @@
+import contextlib
 import http.client
 import io
 import json
@@ -14,6 +15,7 @@ from main import (
     api_error_message,
     error_detail,
     get_input,
+    is_valid_published_at,
     main,
     normalize_section,
     parse_front_matter,
@@ -26,6 +28,20 @@ from main import (
 
 def _mock_api(response_data):
     return io.BytesIO(json.dumps(response_data).encode())
+
+
+def _batch_payload(calls):
+    """The page batch's body, picked out of a run's requests.
+
+    A run makes the batch and then the deploy, and the deploy carries no body,
+    so position is the wrong way to find it. Reading the one request that has
+    a payload keeps these assertions about what was written rather than about
+    how many requests it took to write it.
+    """
+    bodies = [req.data for req in calls if req.data is not None]
+    if len(bodies) != 1:
+        raise AssertionError(f"expected exactly one request with a body, got {len(bodies)}")
+    return json.loads(bodies[0])
 
 
 def _api_http_error(status, body):
@@ -159,6 +175,43 @@ class TestNormalizeSection(unittest.TestCase):
         self.assertEqual(normalize_section("API v2", keep_case=True), "API-v2")
 
 
+class TestIsValidPublishedAt(unittest.TestCase):
+    """The local check has to agree with the API's RFC 3339 parse.
+
+    Accepting more than the server does not save the round trip, and
+    accepting less fails a file the site would have taken.
+    """
+
+    def test_accepts_the_utc_form_this_action_writes(self):
+        # A date-only front matter value becomes this before it is checked,
+        # so a checker that cannot read a trailing "Z" fails every dated
+        # page. datetime.fromisoformat could not read one before Python 3.11.
+        self.assertTrue(is_valid_published_at("2024-06-15T00:00:00Z"))
+
+    def test_accepts_an_offset_and_fractional_seconds(self):
+        self.assertTrue(is_valid_published_at("2024-06-15T14:30:00+02:00"))
+        self.assertTrue(is_valid_published_at("2024-06-15T14:30:00.123Z"))
+
+    def test_rejects_a_timestamp_with_no_zone(self):
+        # The API takes RFC 3339, which requires one.
+        self.assertFalse(is_valid_published_at("2024-06-15T14:30:00"))
+
+    def test_rejects_a_space_separator(self):
+        self.assertFalse(is_valid_published_at("2024-06-15 14:30:00Z"))
+
+    def test_rejects_a_date_with_no_time(self):
+        # Callers pass the completed value; a bare date is completed first.
+        self.assertFalse(is_valid_published_at("2024-06-15"))
+
+    def test_rejects_a_day_that_does_not_exist(self):
+        self.assertFalse(is_valid_published_at("2024-02-30T00:00:00Z"))
+
+    def test_rejects_out_of_range_times(self):
+        self.assertFalse(is_valid_published_at("2024-06-15T24:00:00Z"))
+        self.assertFalse(is_valid_published_at("2024-06-15T23:60:00Z"))
+        self.assertFalse(is_valid_published_at("2024-06-15T23:59:60Z"))
+
+
 class TestTitleize(unittest.TestCase):
     def test_capitalizes_hyphen_separated_words(self):
         self.assertEqual(titleize("hello-world"), "Hello World")
@@ -255,10 +308,22 @@ class TestMain(unittest.TestCase):
 
     @staticmethod
     def _capture_payload(captured):
+        """Stand in for both requests a run makes: the page batch, then the
+        deploy that publishes it.
+
+        The deploy carries no body, which is what tells the two apart here.
+        Recording its URL as well is what keeps a run that silently stopped
+        deploying from passing: a test asserting on the payload alone would
+        not notice.
+        """
+
         def handler(req, **kw):
+            if req.data is None:
+                captured["deploy_url"] = req.full_url
+                return _mock_api({"status": "queued", "deployUrl": "https://x.sitepaste.com"})
             captured["payload"] = json.loads(req.data)
             captured["url"] = req.full_url
-            return _mock_api({"build": {}})
+            return _mock_api({"pages": []})
 
         return handler
 
@@ -618,14 +683,17 @@ class TestMain(unittest.TestCase):
             env = self._env(content_dir=d)
             env["GITHUB_OUTPUT"] = str(out_file)
 
+            def handler(req, **kw):
+                # The bodiless POST is the deploy; only it carries a deploy URL.
+                if req.data is None:
+                    return _mock_api(
+                        {"status": "queued", "deployUrl": "https://example.sitepaste.com"}
+                    )
+                return _mock_api({"pages": [{"slug": "t", "status": "created"}]})
+
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch(
-                    "main.urllib.request.urlopen",
-                    return_value=_mock_api(
-                        {"build": {"deployUrl": "https://example.sitepaste.com"}}
-                    ),
-                ),
+                patch("main.urllib.request.urlopen", side_effect=handler),
             ):
                 main()
 
@@ -766,6 +834,52 @@ class TestMain(unittest.TestCase):
                     main()
                 self.assertEqual(ctx.exception.code, 1)
 
+    def test_a_non_text_value_where_text_belongs_names_the_field(self):
+        # The front matter parser reads `true` and a bracketed list as the
+        # types they name, because draft and tags are read as those. A key
+        # that means text getting one used to end the run with a traceback
+        # naming neither the file nor the field.
+        for front, field in (
+            ("title: true", "title"),
+            ("slug: true", "slug"),
+            ("description: true", "description"),
+            ("publishedAt: true", "publishedAt"),
+            ("date: true", "date"),
+            ("publishedAt: [a, b, c, d, e, f, g, h, i, j]", "publishedAt"),
+        ):
+            with self.subTest(front=front):
+                with tempfile.TemporaryDirectory() as d:
+                    (Path(d) / "post.md").write_text(f"---\n{front}\n---\nbody")
+                    out = io.StringIO()
+                    with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                        with self.assertRaises(SystemExit) as ctx, contextlib.redirect_stdout(out):
+                            main()
+                        self.assertEqual(ctx.exception.code, 1)
+                    self.assertIn(f"::error file=post.md::{field} must be text", out.getvalue())
+
+    def test_a_missing_optional_text_field_is_not_an_error(self):
+        # text_attr reports only a value of the wrong type; absent is fine.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ndraft: true\n---\nbody")
+            captured = {}
+            with (
+                patch.dict(os.environ, self._env(content_dir=d), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=self._capture_payload(captured)),
+            ):
+                main()
+            self.assertEqual(captured["payload"]["pages"][0]["slug"], "post")
+
+    def test_zoneless_published_at_fails_before_the_request(self):
+        # The API parses publishedAt as RFC 3339, which requires a zone, so a
+        # zoneless timestamp is a 422 on the write. Catching it here names
+        # the file instead of an index in the batch.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\npublishedAt: 2024-06-15T14:30:00\n---\nbody")
+            with patch.dict(os.environ, self._env(content_dir=d), clear=True):
+                with self.assertRaises(SystemExit) as ctx:
+                    main()
+                self.assertEqual(ctx.exception.code, 1)
+
     def test_tag_casing_is_preserved_in_payload(self):
         # Typed casing reaches the server, which stores the lowercase slug
         # and captures the casing as the tag's display title — writing "iOS"
@@ -817,7 +931,11 @@ class TestPrune(unittest.TestCase):
                         "offset": offset,
                     }
                 )
-            return _mock_api({"build": {}, "deleted": ["stale"]})
+            # The bodiless POST is the deploy; the one carrying a payload is
+            # the batch.
+            if req.data is None:
+                return _mock_api({"status": "queued", "deployUrl": "https://x.sitepaste.com"})
+            return _mock_api({"pages": [], "deleted": ["stale"]})
 
         return handler
 
@@ -835,7 +953,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             self.assertEqual(
                 payload["deleteSlugs"],
                 [
@@ -858,7 +976,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             pruned = {entry["slug"] for entry in payload["deleteSlugs"]}
             self.assertIn(f"stale-{LIST_PAGE_SIZE - 1}", pruned)
 
@@ -878,7 +996,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             self.assertEqual(payload["deleteSlugs"], [{"slug": "setup", "contentType": "docs"}])
 
     def test_matches_sections_case_insensitively(self):
@@ -894,7 +1012,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             self.assertNotIn("deleteSlugs", payload)
 
     def test_ignores_remote_pages_of_other_content_types(self):
@@ -907,7 +1025,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             self.assertNotIn("deleteSlugs", payload)
 
     def test_omits_delete_slugs_when_nothing_to_prune(self):
@@ -920,7 +1038,7 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api(remote, calls)),
             ):
                 main()
-            payload = json.loads(calls[-1].data)
+            payload = _batch_payload(calls)
             self.assertNotIn("deleteSlugs", payload)
 
     def test_dry_run_lists_prunes_but_only_calls_get(self):
@@ -948,7 +1066,9 @@ class TestPrune(unittest.TestCase):
                 patch("main.urllib.request.urlopen", side_effect=self._prune_api([], calls)),
             ):
                 main()
-            self.assertEqual([req.get_method() for req in calls], ["POST"])
+            # Two POSTs and no GET: the batch, then the deploy. Pruning is what
+            # needs the listing, and it is off here.
+            self.assertEqual([req.get_method() for req in calls], ["POST", "POST"])
 
     def test_get_names_the_site_in_the_path_and_filters_by_content_type(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1243,23 +1363,45 @@ class TestBuildErrorHandling(unittest.TestCase):
     _env = staticmethod(TestMain._env)
 
     @staticmethod
-    def _refused_build():
-        return _mock_api(
-            {
-                "build": {
-                    "error": "The hourly limit of 300 deploys was reached."
-                    " The content was saved; trigger the deploy once the limit resets.",
-                    "code": "rate_limited",
-                }
-            }
-        )
+    def _batch_then(deploy_response):
+        """A run where the batch succeeds and the deploy answers as given.
+
+        deploy_response is returned for the bodiless POST and may be an
+        exception to raise, which is how the API reports a refused deploy now
+        that publishing is its own request. Splitting the two is the point:
+        before, the batch's 200 carried the refusal in a nested field, so a
+        test could not tell a refused deploy from a failed write.
+        """
+
+        def handler(req, **kw):
+            if req.data is not None:
+                return _mock_api({"pages": [{"slug": "t", "status": "created"}]})
+            if isinstance(deploy_response, Exception):
+                raise deploy_response
+            return deploy_response
+
+        return handler
+
+    @staticmethod
+    def _refused_deploy(code="rate_limited", scope=None):
+        body = {
+            "error": "The hourly limit of 300 deploys was reached."
+            " The content was saved; trigger the deploy once the limit resets.",
+            "code": code,
+        }
+        if scope:
+            body["scope"] = scope
+        return _api_http_error(429, body)
 
     def test_fails_the_run_by_default(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
-                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+                patch(
+                    "main.urllib.request.urlopen",
+                    side_effect=self._batch_then(self._refused_deploy()),
+                ),
                 self.assertRaises(SystemExit) as ctx,
             ):
                 main()
@@ -1271,7 +1413,10 @@ class TestBuildErrorHandling(unittest.TestCase):
             env = self._env(content_dir=d, fail_on_build_error="false")
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+                patch(
+                    "main.urllib.request.urlopen",
+                    side_effect=self._batch_then(self._refused_deploy()),
+                ),
             ):
                 main()  # no SystemExit
 
@@ -1285,11 +1430,16 @@ class TestBuildErrorHandling(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, env, clear=True),
-                patch("main.urllib.request.urlopen", return_value=self._refused_build()),
+                patch(
+                    "main.urllib.request.urlopen",
+                    side_effect=self._batch_then(self._refused_deploy()),
+                ),
                 self.assertRaises(SystemExit),
             ):
                 main()
 
+            # The write is its own committed request, so what it produced is
+            # reported whatever the deploy then did.
             output = out_file.read_text()
             self.assertIn("page-count=1", output)
             self.assertNotIn("deploy-url=", output)
@@ -1297,30 +1447,33 @@ class TestBuildErrorHandling(unittest.TestCase):
     def test_a_quota_refusal_also_fails_the_run(self):
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
-            refused = _mock_api(
-                {
-                    "build": {
-                        "error": "The monthly build limit for your plan has been reached.",
-                        "code": "quota_exceeded",
-                    }
-                }
-            )
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
-                patch("main.urllib.request.urlopen", return_value=refused),
+                patch(
+                    "main.urllib.request.urlopen",
+                    side_effect=self._batch_then(self._refused_deploy(code="quota_exceeded")),
+                ),
                 self.assertRaises(SystemExit) as ctx,
             ):
                 main()
             self.assertEqual(ctx.exception.code, 1)
 
-    def test_a_null_build_field_is_not_a_refusal(self):
+    def test_a_deploy_that_never_answered_still_fails_the_run(self):
+        # A transport failure leaves exactly the state a refusal does: pages
+        # written, site on its old build. It is reported the same way rather
+        # than escaping as a traceback.
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
-                patch("main.urllib.request.urlopen", return_value=_mock_api({"build": None})),
+                patch(
+                    "main.urllib.request.urlopen",
+                    side_effect=self._batch_then(urllib.error.URLError("connection reset")),
+                ),
+                self.assertRaises(SystemExit) as ctx,
             ):
-                main()  # no SystemExit
+                main()
+            self.assertEqual(ctx.exception.code, 1)
 
     def test_a_token_without_the_deploy_scope_is_told_which_scope_is_missing(self):
         # The commonest way a run reaches this branch is a token minted with
@@ -1328,23 +1481,93 @@ class TestBuildErrorHandling(unittest.TestCase):
         # log that does not name it leaves the reader with no remedy.
         with tempfile.TemporaryDirectory() as d:
             (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
-            refused = _mock_api(
+            refused = _api_http_error(
+                403,
                 {
-                    "build": {
-                        "error": 'This token does not carry the "deploy" scope.',
-                        "code": "token_scope_required",
-                        "scope": "deploy",
-                    }
-                }
+                    "error": 'This token does not carry the "deploy" scope.',
+                    "code": "token_scope_required",
+                    "scope": "deploy",
+                },
             )
             with (
                 patch.dict(os.environ, self._env(content_dir=d), clear=True),
-                patch("main.urllib.request.urlopen", return_value=refused),
+                patch("main.urllib.request.urlopen", side_effect=self._batch_then(refused)),
                 patch("sys.stdout", new_callable=io.StringIO) as out,
                 self.assertRaises(SystemExit),
             ):
                 main()
             self.assertIn('"deploy" scope', out.getvalue())
+
+
+class TestRequestShape(unittest.TestCase):
+    """Where a run sends what, now that writing and publishing are two calls."""
+
+    _env = staticmethod(TestMain._env)
+
+    def _run(self, content_dir):
+        calls = []
+
+        def handler(req, **kw):
+            calls.append(req)
+            if req.data is None:
+                return _mock_api({"status": "queued", "deployUrl": "https://x.sitepaste.com"})
+            return _mock_api({"pages": []})
+
+        with (
+            patch.dict(os.environ, self._env(content_dir=content_dir), clear=True),
+            patch("main.urllib.request.urlopen", side_effect=handler),
+        ):
+            main()
+        return calls
+
+    def test_pages_go_to_the_batch_route(self):
+        # The collection itself creates one page. A whole directory is a
+        # batch, and posting the envelope to the collection is a 422.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            calls = self._run(d)
+            self.assertEqual(
+                calls[0].full_url,
+                "https://sitepaste.com/api/v1/public/sites/default/pages/batch",
+            )
+
+    def test_the_deploy_is_its_own_request_sent_after_the_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            calls = self._run(d)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(
+                calls[1].full_url,
+                "https://sitepaste.com/api/v1/public/sites/default/deployments",
+            )
+            # Ordered, so a directory that failed to sync is never followed by
+            # a build of the old content.
+            self.assertIsNotNone(calls[0].data)
+            self.assertIsNone(calls[1].data)
+
+    def test_the_write_carries_no_build_field(self):
+        # The API refuses it with a 422 naming the field, so sending it would
+        # fail every run.
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            calls = self._run(d)
+            self.assertNotIn("build", _batch_payload(calls))
+
+    def test_dry_run_writes_nothing_and_deploys_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "post.md").write_text("---\ntitle: T\n---\nbody")
+            calls = []
+
+            def handler(req, **kw):
+                calls.append(req)
+                return _mock_api({})
+
+            with (
+                patch.dict(os.environ, self._env(content_dir=d, dry_run="true"), clear=True),
+                patch("main.urllib.request.urlopen", side_effect=handler),
+            ):
+                main()
+            self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   apiErrorMessage,
+  deployRefusalMessage,
   envelopeFieldErrors,
   errorDetail,
   extractOverrides,
@@ -75,6 +76,35 @@ test('pagePath renders the published URL, not the typed section casing', () => {
 test('slugify still lowercases by default', () => {
   // Called on note basenames (extension already stripped by Obsidian).
   assert.equal(slugify('Hello World'), 'hello-world');
+});
+
+// --- publishedAt: what the API's RFC 3339 parse takes ---
+
+test('a UTC timestamp is accepted, the form a date-only note is completed to', () => {
+  assert.deepEqual(validatePage(page({ publishedAt: '2025-01-15T12:00:00Z' })), []);
+});
+
+test('an offset and fractional seconds are accepted', () => {
+  assert.deepEqual(validatePage(page({ publishedAt: '2025-01-15T12:00:00+02:00' })), []);
+  assert.deepEqual(validatePage(page({ publishedAt: '2025-01-15T12:00:00.123Z' })), []);
+});
+
+test('a timestamp with no zone is refused, because RFC 3339 requires one', () => {
+  const errors = validatePage(page({ publishedAt: '2025-01-15T12:00:00' }));
+  assert.equal(errors[0]?.field, 'publishedAt');
+});
+
+test('a date that is not a timestamp is refused', () => {
+  // Date reads both of these; the API reads neither.
+  assert.equal(validatePage(page({ publishedAt: 'January 15, 2025' }))[0]?.field, 'publishedAt');
+  assert.equal(validatePage(page({ publishedAt: '2025-01-15' }))[0]?.field, 'publishedAt');
+});
+
+test('a day that does not exist is refused', () => {
+  assert.equal(
+    validatePage(page({ publishedAt: '2025-02-30T00:00:00Z' }))[0]?.field,
+    'publishedAt',
+  );
 });
 
 // --- Passthrough fields: author, password, OG image, language, overrides ---
@@ -275,7 +305,7 @@ test('an empty body still produces a message', () => {
   assert.equal(apiErrorMessage(502, {}), 'Publish failed (502): unknown error');
 });
 
-// --- errorDetail: the same triple, read out of a batch's build field ---
+// --- errorDetail: the same triple, read out of a refused deploy's envelope ---
 
 test('a deploy refused for a missing scope names the deploy scope', () => {
   const detail = errorDetail({
@@ -295,6 +325,22 @@ test('a deploy refused by a quota shows the API sentence', () => {
     }),
     'The monthly build limit for your plan has been reached.',
   );
+});
+
+// --- deployRefusalMessage: a refused deploy always says something ---
+
+test('a refusal with an envelope reads as the envelope does', () => {
+  assert.equal(
+    deployRefusalMessage(429, { error: 'deploy cooldown active', code: 'cooldown_active' }),
+    'deploy cooldown active',
+  );
+});
+
+test('a refusal with no envelope still says the deploy was refused', () => {
+  // A proxy's HTML 502 never reaches the API, so there is no envelope to
+  // render. An empty string here would report the refusal as a clean
+  // publish, since the callers show this only when it is truthy.
+  assert.equal(deployRefusalMessage(502, {}), 'the deploy was refused (HTTP 502)');
 });
 
 // --- Envelope field errors: the batch's own problems, belonging to no page ---

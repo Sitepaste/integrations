@@ -4,7 +4,7 @@ A GitHub Action that syncs markdown files to [Sitepaste](https://sitepaste.com) 
 
 Requires a Pro plan, as API tokens can only be created and used on the Pro plan.
 
-The token needs the `content` and `deploy` scopes. `content` writes the pages and `deploy` publishes them. Scopes are chosen when the token is created in the dashboard under Account > Tokens, and cannot be changed afterwards. The deploy travels in the same `POST /sites/{siteId}/pages` request that writes the pages, but it is the same deploy `POST /sites/{siteId}/deployments` queues, and it requires that route's scope. A token holding `content` alone still syncs every page, and the deploy then comes back refused, which `fail-on-build-error` turns into a failed run.
+The token needs the `content` and `deploy` scopes. `content` writes the pages through `POST /sites/{siteId}/pages/batch`, and `deploy` publishes them through `POST /sites/{siteId}/deployments`, which the action sends once the pages have landed. Scopes are chosen when the token is created in the dashboard under Account > Tokens, and cannot be changed afterwards. A token holding `content` alone still syncs every page, and the deploy then comes back refused, which `fail-on-build-error` turns into a failed run.
 
 ## Quick start
 
@@ -87,7 +87,7 @@ Your content here...
 
 All fields are optional. `slug` is derived from the filename when absent (lowercased, special characters replaced with hyphens). `title` is derived from the slug when absent (hyphens to spaces, capitalized). `section` is derived from the parent subdirectory when absent. All other fields are omitted from the API payload when absent, preserving any values set in the dashboard.
 
-`publishedAt` accepts both date-only (`2026-02-17`) and full RFC 3339 (`2026-02-17T00:00:00Z`) formats.
+`publishedAt` accepts both date-only (`2026-02-17`) and full RFC 3339 (`2026-02-17T00:00:00Z`) formats. A date-only value is taken as midnight UTC. A timestamp has to carry a zone, either `Z` or an offset like `+02:00`, because that is what the API reads.
 
 `api_endpoint` marks the page as an API reference: an HTTP method optionally followed by a path (max 200 chars). The method shows as a badge next to the page in the site navigation.
 
@@ -120,12 +120,12 @@ The `content-type` input sets the type for every file in the run; a file that ca
 2. Derives sections from subdirectory names (overridable via front matter).
 3. Parses front matter and derives missing slugs and titles from filenames.
 4. Validates content limits and checks for duplicate slugs within each section.
-5. Sends a single `POST /api/v1/public/sites/{siteId}/pages` request with all pages and `build: true`.
+5. Sends a single `POST /api/v1/public/sites/{siteId}/pages/batch` request with all pages, then `POST /api/v1/public/sites/{siteId}/deployments` to publish them.
 6. Reports results via GitHub Actions annotations.
 
 ## Deploys
 
-The pages and the deploy travel in one request, so a run either writes every page or writes none, and the deploy is queued once the writes have landed.
+The batch is one transaction, so a run either writes every page or writes none. The deploy is a second request, sent only once those writes have landed, so a run that failed to sync never publishes the old content.
 
 The deploy can still be refused once the pages are saved. A token without the `deploy` scope, the monthly deploy quota, the 30-second cooldown between deploys, and an hourly budget of 300 deploys shared by every token in the workspace each do so on their own. In practice the cooldown is the one a busy repository meets, since it caps a site at 120 deploys an hour on its own. When that happens the pages are saved but the site keeps serving the previous build, so the run fails by default with the API's reason. Set `fail-on-build-error: 'false'` to report it as a warning and pass instead, which suits a workflow that deploys on a schedule rather than on every push.
 
@@ -135,7 +135,7 @@ Pages are created or updated by slug. By default, existing pages not in the batc
 
 ## Pruning
 
-By default the action is additive: deleting or renaming a file in the repository leaves the old page live on the site. With `prune: 'true'`, the content directory becomes the single source of truth for its content type, and any page not matched by a local file (by section and slug) is deleted in the same request that syncs the batch. Upserts, deletions, and the build are applied together, so the site never serves a half-synced state.
+By default the action is additive: deleting or renaming a file in the repository leaves the old page live on the site. With `prune: 'true'`, the content directory becomes the single source of truth for its content type, and any page not matched by a local file (by section and slug) is deleted in the same request that syncs the batch. Upserts and deletions are one transaction, and the deploy follows it, so the site never serves a half-synced state.
 
 Only pages matching `content-type` are ever considered. The homepage, other content types, and other sites are untouched. But note that within that content type, the repository wins: pages created in the dashboard or via the Obsidian plugin will be deleted if they have no matching file. Enable pruning only when the repository owns that content type.
 
